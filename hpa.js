@@ -3583,8 +3583,8 @@
     const lowConfidenceLegendTitle = dom.lowConfidence && dom.lowConfidence.title
       ? dom.lowConfidence.title
       : "Low-confidence region, where the inverse problem is poorly conditioned.";
-    const diffusionPlotLegendText = "Apparent Diffusion Coefficient Dapp";
-    const smoothedDiffusionPlotLegendText = "Smoothed Dapp";
+    const diffusionPlotLegendText = "Apparent Diffusion Coefficient DInv";
+    const smoothedDiffusionPlotLegendText = "Smoothed DInv";
     const currentLegendText = signalMeta.legendText;
     const fitLegendText = "Global Transient Fit";
     const showLowConfidenceLegend = lowConfidenceMode === "shaded";
@@ -3618,14 +3618,14 @@
         <g class="hpa-plot-legend-item hpa-plot-legend-diffusion" transform="translate(${(showLowConfidenceLegend ? lowConfidenceLegendWidth + legendGap : 0)} 0)">
           <line x1="0" y1="6" x2="18" y2="6" class="hpa-plot-legend-line"></line>
           <text x="26" y="10">
-            <tspan x="26" dy="0">Apparent Diffusion Coefficient </tspan><tspan font-style="italic">D</tspan><tspan baseline-shift="sub" font-size="8">app</tspan>
+            <tspan x="26" dy="0">Apparent Diffusion Coefficient </tspan><tspan font-style="italic">D</tspan><tspan baseline-shift="sub" font-size="8">Inv</tspan>
           </text>
         </g>
         ${showSmoothedLegend ? `
         <g class="hpa-plot-legend-item hpa-plot-legend-diffusion-smoothed" transform="translate(${(showLowConfidenceLegend ? lowConfidenceLegendWidth + legendGap : 0) + diffusionLegendWidth + legendGap} 0)">
           <line x1="0" y1="6" x2="18" y2="6" class="hpa-plot-legend-line"></line>
           <text x="26" y="10">
-            <tspan x="26" dy="0">Smoothed </tspan><tspan font-style="italic">D</tspan><tspan baseline-shift="sub" font-size="8">app</tspan>
+            <tspan x="26" dy="0">Smoothed </tspan><tspan font-style="italic">D</tspan><tspan baseline-shift="sub" font-size="8">Inv</tspan>
           </text>
         </g>` : ""}
         <g class="hpa-plot-legend-item hpa-plot-legend-current" transform="translate(${(showLowConfidenceLegend ? lowConfidenceLegendWidth + legendGap : 0) + diffusionLegendWidth + (showSmoothedLegend ? legendGap + smoothedDiffusionLegendWidth : 0) + legendGap} 0)">
@@ -3932,16 +3932,16 @@
     items.push(
       buildTextItem(
         "hpa-plot-legend-diffusion",
-        "Apparent Diffusion Coefficient Dapp",
-        `<tspan x="${textX}" dy="0">Apparent Diffusion Coefficient </tspan><tspan font-style="italic">D</tspan><tspan baseline-shift="sub" font-size="${subFontSize}">app</tspan>`,
+        "Apparent Diffusion Coefficient DInv",
+        `<tspan x="${textX}" dy="0">Apparent Diffusion Coefficient </tspan><tspan font-style="italic">D</tspan><tspan baseline-shift="sub" font-size="${subFontSize}">Inv</tspan>`,
       ),
     );
     if (showSmoothedLegend) {
       items.push(
         buildTextItem(
           "hpa-plot-legend-diffusion-smoothed",
-          "Smoothed Dapp",
-          `<tspan x="${textX}" dy="0">Smoothed </tspan><tspan font-style="italic">D</tspan><tspan baseline-shift="sub" font-size="${subFontSize}">app</tspan>`,
+          "Smoothed DInv",
+          `<tspan x="${textX}" dy="0">Smoothed </tspan><tspan font-style="italic">D</tspan><tspan baseline-shift="sub" font-size="${subFontSize}">Inv</tspan>`,
         ),
       );
     }
