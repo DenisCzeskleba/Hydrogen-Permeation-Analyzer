@@ -467,7 +467,7 @@ test("positive t0 uses the median early dt for irregular traces", () => {
   );
 });
 
-test("global transient fit keeps the current t0 fixed and ignores prepended baseline rows", () => {
+test("global transient fit keeps the selected t0 fixed and ignores synthetic prepended baseline rows", () => {
   const rows = buildFickSeries({
     thicknessMm: 0.5,
     diffusivity: 5e-10,
@@ -481,16 +481,26 @@ test("global transient fit keeps the current t0 fixed and ignores prepended base
   const fitFromRaw = core.buildFitResult(rows, 0.5, 0, 1, 0);
   const shiftedRows = core.applyTimeOffsetRows(rows, 20, 0);
   const fitFromPrepended = core.buildFitResult(shiftedRows, 0.5, 0, 1, 20);
+  const shiftedMeasuredRows = shiftedRows.filter((row) => row.origin !== "prepended_baseline");
+  const fitFromShiftedMeasured = core.buildFitResult(shiftedMeasuredRows, 0.5, 0, 1, 20);
+  const fullyShiftedRows = core.applyTimeOffsetRows(rows, 40, 0);
+  const fitFromKnownOffset = core.buildFitResult(fullyShiftedRows, 0.5, 0, 1, 40);
 
   assert.ok(fitFromRaw.available, "expected fit on raw rows");
   assert.ok(fitFromPrepended.available, "expected fit on prepended rows");
+  assert.ok(fitFromShiftedMeasured.available, "expected fit on shifted measured rows");
+  assert.ok(fitFromKnownOffset.available, "expected fit at the generating time offset");
   assert.equal(fitFromRaw.timeOffset, 0);
   assert.equal(fitFromPrepended.timeOffset, 0);
   assert.equal(fitFromRaw.totalTimeOffset, 0);
   assert.equal(fitFromPrepended.totalTimeOffset, 20);
   assert.ok(
-    Math.abs(fitFromRaw.diffusivity - fitFromPrepended.diffusivity) / fitFromRaw.diffusivity < 0.08,
-    `expected similar fitted D, got raw ${fitFromRaw.diffusivity} vs prepended ${fitFromPrepended.diffusivity}`,
+    Math.abs(fitFromPrepended.diffusivity - fitFromShiftedMeasured.diffusivity) / fitFromPrepended.diffusivity < 1e-12,
+    `expected synthetic rows to be ignored, got ${fitFromPrepended.diffusivity} vs ${fitFromShiftedMeasured.diffusivity}`,
+  );
+  assert.ok(
+    Math.abs(fitFromKnownOffset.diffusivity - 5e-10) / 5e-10 < 0.02,
+    `expected the known +40 s correction to recover D, got ${fitFromKnownOffset.diffusivity}`,
   );
 });
 
