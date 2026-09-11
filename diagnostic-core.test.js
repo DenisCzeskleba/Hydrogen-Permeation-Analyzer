@@ -89,6 +89,33 @@ function findInterpolatedCrossingTime(rows, threshold) {
   return null;
 }
 
+test("diagnostics allow 600 candidates and offsets from -600 s to +600 s", () => {
+  assert.equal(core.DIAGNOSTIC_CANDIDATE_LIMIT, 600);
+  assert.equal(core.DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS, 600);
+  assert.equal(core.DIAGNOSTIC_TIMEOUT_MS, 30000);
+  assert.equal(core.FIT_TIME_OFFSET_LIMIT_SECONDS, 600);
+});
+
+test("diagnostic safety stop returns the best completed partial result with progress", () => {
+  const rows = buildFickSeries({ duration: 720 });
+  const report = core.analyzeDiagnostic({
+    rows,
+    thicknessMm: 0.5,
+    baselineValue: 0,
+    steadyValue: 1,
+    t0Offset: 0,
+    timeoutMs: 0,
+  });
+
+  assert.ok(report.best, "expected the current candidate to remain available");
+  assert.ok(report.searchProgress);
+  assert.equal(report.searchProgress.timedOut, true);
+  assert.equal(report.searchProgress.completedCandidateCount, 1);
+  assert.ok(report.searchProgress.totalCandidateCount > report.searchProgress.completedCandidateCount);
+  assert.match(report.summary, /timed out/i);
+  assert.ok(report.findings.some((finding) => finding.title === "Diagnostic timeout"));
+});
+
 test("diagnostic finds a nonzero time-zero correction when the transient is delayed", () => {
   const rows = buildFickSeries({ delay: 40, duration: 720 });
   const report = core.analyzeDiagnostic({
@@ -100,9 +127,37 @@ test("diagnostic finds a nonzero time-zero correction when the transient is dela
   });
 
   assert.ok(report.best);
-  assert.ok(Math.abs(report.best.t0Offset) > 5, `expected a nonzero t0, got ${report.best.t0Offset}`);
+  assert.ok(report.best.t0Offset > 5, `expected a positive t0, got ${report.best.t0Offset}`);
+  assert.ok(Math.abs(report.best.t0Offset - 40) <= 10, `expected t0 near +40 s, got ${report.best.t0Offset}`);
   assert.ok(report.comparison);
   assert.ok(Math.abs(report.comparison.t0Delta) > 5);
+  assert.equal(report.searchProgress.strategy, "adaptive-coarse-to-fine");
+  assert.ok(report.searchProgress.completedCandidateCount <= core.DIAGNOSTIC_CANDIDATE_LIMIT);
+  assert.ok(report.searchProgress.stages.some((stage) => stage.name === "coarse"));
+  assert.ok(report.searchProgress.stages.some((stage) => /^refine-/.test(stage.name)));
+  assert.ok(report.searchProgress.stages.some((stage) => stage.name === "full-resolution-validation"));
+  assert.equal(report.searchProgress.fullResolutionFinalistCount, 5);
+  assert.ok(report.searchProgress.timings.fixedFitMs > 0);
+  assert.ok(report.searchProgress.bestScoreProgression.length > 0);
+  assert.equal(report.searchProgress.completedCandidateCount, core.DIAGNOSTIC_CANDIDATE_LIMIT);
+  for (let index = 1; index < report.searchProgress.bestScoreProgression.length; index += 1) {
+    assert.ok(
+      report.searchProgress.bestScoreProgression[index].score < report.searchProgress.bestScoreProgression[index - 1].score,
+      "expected best-score progression to improve monotonically",
+    );
+  }
+
+  const repeated = core.analyzeDiagnostic({
+    rows,
+    thicknessMm: 0.5,
+    baselineValue: 0,
+    steadyValue: 1,
+    t0Offset: 0,
+  });
+  assert.equal(repeated.best.t0Offset, report.best.t0Offset);
+  assert.equal(repeated.best.baselineValue, report.best.baselineValue);
+  assert.equal(repeated.best.steadyValue, report.best.steadyValue);
+  assert.equal(repeated.best.score, report.best.score);
 });
 
 test("diagnostic favors a negative time-zero correction when pre-run baseline is present", () => {
@@ -117,6 +172,7 @@ test("diagnostic favors a negative time-zero correction when pre-run baseline is
 
   assert.ok(report.best);
   assert.ok(report.best.t0Offset < -5, `expected negative t0, got ${report.best.t0Offset}`);
+  assert.ok(Math.abs(report.best.t0Offset + 20) <= 5, `expected t0 near -20 s, got ${report.best.t0Offset}`);
   assert.ok(report.comparison);
   assert.ok(report.comparison.t0Delta < -5);
 });

@@ -65,7 +65,7 @@ permalink: /hpa/
 
         <div class="hpa-control" style="margin-top:0.25rem;">
           <label for="hpa-t0-offset" title="Set the start time offset. Negative values remove early time; positive values reconstruct prepended baseline time.">Start Time Offset (t<sub>0</sub>)</label>
-          <input id="hpa-t0-offset" type="range" min="-180" max="180" step="0.1" value="0" title="Set the start time offset. Negative values remove early time; positive values reconstruct prepended baseline time." />
+          <input id="hpa-t0-offset" type="range" min="-600" max="600" step="0.1" value="0" title="Set the start time offset from -600 s to +600 s. Negative values remove early time; positive values reconstruct prepended baseline time." />
           <div class="hpa-slider-value" id="hpa-t0-offset-value">0.0 s</div>
         </div>
 
@@ -322,7 +322,7 @@ permalink: /hpa/
           <article class="hpa-result-card hpa-result-card-fit">
             <h3>Global Transient Fit</h3>
             <button type="button" class="hpa-button is-secondary hpa-fit-toggle" id="hpa-fit-toggle" aria-pressed="false" title="Show or hide the fitted curve.">Show</button>
-            <button type="button" class="hpa-button is-secondary hpa-fit-optimize" id="hpa-fit-optimize" title="Search the full Start Time Offset range for the best total Start Time Offset and fitted D by RMSE.">Optimize D<sub>GTF</sub></button>
+            <button type="button" class="hpa-button is-secondary hpa-fit-optimize" id="hpa-fit-optimize" title="Search the -600 s to +600 s GTF offset range for the best total Start Time Offset and fitted D by RMSE.">Optimize D<sub>GTF</sub></button>
             <div class="hpa-result-value" id="hpa-fit-value">D<sub>GTF</sub> = NaN</div>
             <div class="hpa-result-meta" id="hpa-fit-time">Load data to fit D for the current t<sub>0</sub>.</div>
             <div class="hpa-result-note" id="hpa-fit-note"></div>
@@ -399,7 +399,7 @@ permalink: /hpa/
           <li>The membrane thickness is entered in mm. It matters because all diffusion coefficients scale with <code>L<sup>2</sup></code>, so a unit mistake changes every result by a large factor.</li>
           <li>The baseline and steady-state fields define the normalization used by the analysis. If they are left blank, HPA starts from the minimum and maximum values in the loaded data.</li>
           <li>You can type baseline and steady-state values manually, or drag the reference lines directly on the plot while <strong>Signal representation</strong> is set to <strong>Current</strong>. In normalized mode the reference guides stay fixed at 0% and 100%, so the values remain editable from the <strong>Baseline</strong> panel.</li>
-          <li>The <strong>Start Time Offset</strong> control shifts the trace before analysis. A positive offset reconstructs a dense baseline segment before the transient and moves the measured data forward. A negative offset removes early time and shifts the remaining data back to zero.</li>
+          <li>The <strong>Start Time Offset</strong> control shifts the trace over a range of -600 s to +600 s before analysis. A positive offset reconstructs a dense baseline segment before the transient and moves the measured data forward. A negative offset removes early time and shifts the remaining data back to zero.</li>
           <li>Plot Options let you change the signal representation, choose the current display unit, choose colors for the main lines, decide how inverse-conditioning-based low-confidence diffusion segments are drawn, turn grid lines and minor grid lines on or off, and switch the diffusion axis between linear and logarithmic scaling.</li>
           <li>The <strong>Reset</strong> button restores the default plot view. The <strong>Hide/Show</strong> buttons toggle the reference markers without deleting their values.</li>
         </ul>
@@ -430,7 +430,7 @@ permalink: /hpa/
           <li><strong>Time Lag</strong> can use either the <strong>Analytic</strong> 61.7% crossing from the ideal planar Fickian solution or the <strong>Historic</strong> 63% crossing widely used in the permeation literature. The selected button changes every place HPA uses the time-lag threshold, including diagnostics and global-fit seeding. See <a href="https://doi.org/10.1098/rspa.1920.0034">10.1098/rspa.1920.0034</a> for the analytic solution and <a href="https://doi.org/10.1149/1.2425894">10.1149/1.2425894</a> for the historic 63% convention.</li>
           <li><strong>Inflection Point</strong> uses the maximum-slope point of the normalized curve and evaluates <code>D<sub>IP</sub></code> from the normalized slope at that point. It is only useful when the curve has one clear inflection.</li>
           <li><strong>Inverse Fickian</strong> inverts the ideal Fickian response point by point to produce <code>D<sub>app</sub>(t)</code>. HPA shades low-confidence regions where the inverse problem is poorly conditioned, then reports an average value when a stable middle window is robust enough.</li>
-          <li><strong>Global Transient Fit</strong> fits one constant <code>D</code> for the current <strong>Start Time Offset</strong> slider value. <strong>Optimize D<sub>GTF</sub></strong> runs a slower full-range search for the best total <code>t<sub>0</sub></code> and refitted <code>D</code> by RMSE, then applies that total offset to the slider.</li>
+          <li><strong>Global Transient Fit</strong> fits one constant <code>D</code> for the current <strong>Start Time Offset</strong> slider value. Separately, <strong>Optimize D<sub>GTF</sub></strong> runs a slower -600 s to +600 s search for the best total <code>t<sub>0</sub></code> and refitted <code>D</code> by RMSE, then applies that total offset to the slider.</li>
         </ul>
         <p>The low-confidence shade is a practical proxy, not a new physics claim. A useful intuition is <code>f(x) = 1 / (1-x)</code>: as <code>x</code> approaches 1, the inverse blows up, so the flat tail is less trustworthy.</p>
         <p>The preview table shows <code>D<sub>app</sub></code> in mm&sup2;/s for readability and includes an <strong>Origin</strong> column that distinguishes measured rows from reconstructed prepended baseline. The CSV export writes <code>D<sub>app</sub></code> in m&sup2;/s, adds a <strong>D_app confidence</strong> label so external tools can separate trusted rows from the low-confidence inverse region, and includes the measurement-aligned simulated measurement from <code>D<sub>GTF</sub></code>.</p>
@@ -460,7 +460,10 @@ permalink: /hpa/
           <li>The composite score is a heuristic measure of how self-consistent the selected preprocessing looks. Lower is better.</li>
           <li>Confidence is derived from that score and is meant as a convenience indicator, not as a statistical probability.</li>
           <li>The diagnostic agreement check compares time lag, inflection point, inverse Fickian, and the global fit. Breakthrough is intentionally excluded from that confidence score and from global-fit seeding.</li>
-          <li>The top candidates are alternate baseline, steady-state, and time-zero combinations that the diagnostic search tested against the same data.</li>
+          <li>The top candidates are alternate baseline, steady-state, and time-zero combinations that the diagnostic search tested against the same data. Diagnostic time-zero candidates are constrained to the supported -600 s to +600 s range.</li>
+          <li>The search uses a globally distributed coarse pass, keeps several distinct promising regions, and spends the remaining candidate budget refining baseline, steady state, and <code>t<sub>0</sub></code> around those regions. The five finalists are then scored again against all input rows.</li>
+          <li><strong>Search telemetry</strong> reports candidate generation, deduplication, evaluation and rejection counts, search stages, runtime by calculation type, and the sequence of improvements to the best score.</li>
+          <li>A 30-second safety stop prevents an unusually expensive diagnostic search from running indefinitely. If it is reached, HPA reports how many candidate combinations were evaluated and uses the best completed result.</li>
           <li><strong>Apply Best</strong> copies the best candidate into the main controls and reruns the analysis.</li>
           <li><strong>Revert</strong> restores the state that existed before diagnostics were run.</li>
         </ul>
@@ -533,11 +536,16 @@ permalink: /hpa/
         <div id="hpa-diagnostic-candidates" class="hpa-diagnostic-candidates"></div>
       </section>
 
+      <section class="hpa-diagnostic-block hpa-diagnostic-section--results">
+        <h3>Search telemetry</h3>
+        <div id="hpa-diagnostic-telemetry" class="hpa-diagnostic-text">Telemetry appears after Diagnostics runs.</div>
+      </section>
+
       <div class="hpa-diagnostic-busy" id="hpa-diagnostic-busy" hidden>
         <span class="hpa-diagnostic-busy-dot" aria-hidden="true"></span>
         <div>
           <strong>Diagnosing</strong>
-          <div id="hpa-diagnostic-busy-text">Working through the candidate settings now.</div>
+              <div id="hpa-diagnostic-busy-text">Working through the candidate settings now. A 30-second safety stop will preserve the best completed result.</div>
         </div>
       </div>
 

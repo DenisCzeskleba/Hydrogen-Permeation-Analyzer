@@ -15,10 +15,23 @@
     dUpper: 1e-4,
   };
 
+  const DIAGNOSTIC_CANDIDATE_LIMIT = 600;
+  const DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS = 600;
+  const DIAGNOSTIC_TIMEOUT_MS = 30000;
+  const FIT_TIME_OFFSET_LIMIT_SECONDS = 600;
   const SEARCH_POLICY = {
     maxRows: 140,
     flatnessSampleRows: 10,
-    candidateLimit: 120,
+    candidateLimit: DIAGNOSTIC_CANDIDATE_LIMIT,
+    fullResolutionFinalistCount: 5,
+    coarseCandidateBudget: 300,
+    globalT0Step: 100,
+    eliteMinDistance: 0.04,
+    refinementRounds: [
+      { name: "refine-medium", budget: 160, eliteCount: 10, signalStepFraction: 0.03, t0Step: 10 },
+      { name: "refine-fine", budget: 90, eliteCount: 8, signalStepFraction: 0.01, t0Step: 2 },
+      { name: "refine-final", budget: 50, eliteCount: 6, signalStepFraction: 0.003, t0Step: 0.5 },
+    ],
     minCentralFraction: 0.4,
   };
   const BREAKTHROUGH_NORMALIZED_THRESHOLD = 0.096;
@@ -49,50 +62,213 @@
   const ROW_ORIGIN_PREPENDED_BASELINE = "prepended_baseline";
 
   function analyzeDiagnostic(input) {
+    const startedAt = Date.now();
+    const timingStartedAt = monotonicNow();
+    const timings = createDiagnosticTimings();
+    const requestedTimeoutMs = toFiniteNumber(input && input.timeoutMs);
+    const timeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs >= 0 ? requestedTimeoutMs : DIAGNOSTIC_TIMEOUT_MS;
+    const deadline = startedAt + timeoutMs;
     const sourceRows = sortRows(Array.isArray(input && input.rows) ? input.rows : []);
     const thicknessMm = toFiniteNumber(input && input.thicknessMm);
     const thicknessMeters = Number.isFinite(thicknessMm) ? thicknessMm / 1000 : null;
     const cropRange = normalizeCropRange(input && input.cropRange);
     const currentState = normalizeState(input);
     const searchRows = sampleEvenly(sourceRows, SEARCH_POLICY.maxRows);
-    const currentCandidate = evaluateCandidate({
-      rows: searchRows,
-      thicknessMm,
-      cropRange,
-      candidate: currentState,
-      label: "current",
-      detailLevel: "search",
-      timeLagMode: input && input.timeLagMode,
-    });
+    let phaseStartedAt = monotonicNow();
     const rawChecks = analyzeRawChecks(sourceRows, currentState, cropRange, thicknessMeters);
-    const candidates = buildCandidateStates(sourceRows, currentState);
+    timings.rawChecksMs += monotonicNow() - phaseStartedAt;
+    phaseStartedAt = monotonicNow();
+    const candidatePlan = buildCandidateStates(sourceRows, currentState);
+    timings.candidateGenerationMs += monotonicNow() - phaseStartedAt;
     const evaluated = [];
+    const evaluatedKeys = new Set();
+    const generatedKeys = new Set(candidatePlan.candidates.map((candidate) => candidateKey(candidate)));
+    const currentKey = candidateKey(currentState);
+    let currentCandidate = null;
+    let generatedCandidateCount = candidatePlan.generatedCandidateCount;
+    let scheduledCandidateCount = 0;
+    let completedCandidateCount = 0;
+    let timedOut = false;
+    let runningBestScore = Number.POSITIVE_INFINITY;
+    const bestScoreProgression = [];
+    const stages = [];
+    const adaptiveSearchBudget = Math.max(1, SEARCH_POLICY.candidateLimit - SEARCH_POLICY.fullResolutionFinalistCount);
 
-    candidates.forEach((candidate) => {
-      const result = evaluateCandidate({
-        rows: searchRows,
-        thicknessMm,
-        cropRange,
-        candidate,
-        label: candidate.label,
-        detailLevel: "search",
-        timeLagMode: input && input.timeLagMode,
-      });
-      if (result) evaluated.push(result);
-    });
+    function evaluateStage(name, stageCandidates, stageBudget) {
+      const remainingBudget = adaptiveSearchBudget - completedCandidateCount;
+      const unseen = uniqueCandidates(stageCandidates).filter((candidate) => !evaluatedKeys.has(candidateKey(candidate)));
+      const selectionStartedAt = monotonicNow();
+      const selected = selectDiverseCandidates(
+        unseen,
+        Math.min(Math.max(0, stageBudget), remainingBudget),
+        candidatePlan.bounds,
+        currentState,
+      );
+      timings.candidateSelectionMs += monotonicNow() - selectionStartedAt;
+      const stage = {
+        name,
+        generatedCandidateCount: stageCandidates.length,
+        uniqueUnseenCandidateCount: unseen.length,
+        scheduledCandidateCount: selected.length,
+        completedCandidateCount: 0,
+        validCandidateCount: 0,
+        rejectedCandidateCount: 0,
+        elapsedMs: 0,
+      };
+      const stageStartedAt = monotonicNow();
+      scheduledCandidateCount += selected.length;
 
-    if (currentCandidate) {
-      const key = candidateKey(currentCandidate);
-      if (!evaluated.some((entry) => candidateKey(entry) === key)) {
-        evaluated.push(currentCandidate);
+      for (const candidate of selected) {
+        if (completedCandidateCount > 0 && Date.now() >= deadline) {
+          timedOut = true;
+          break;
+        }
+        const key = candidateKey(candidate);
+        evaluatedKeys.add(key);
+        const result = evaluateCandidate({
+          rows: searchRows,
+          thicknessMm,
+          cropRange,
+          candidate,
+          label: candidate.label,
+          detailLevel: "search",
+          timeLagMode: input && input.timeLagMode,
+          deadline,
+          timings,
+        });
+        completedCandidateCount += 1;
+        stage.completedCandidateCount += 1;
+        if (result) {
+          evaluated.push(result);
+          stage.validCandidateCount += 1;
+          if (Number.isFinite(result.score && result.score.composite) && result.score.composite < runningBestScore) {
+            runningBestScore = result.score.composite;
+            bestScoreProgression.push({
+              stage: name,
+              completedCandidateCount,
+              validCandidateCount: evaluated.length,
+              elapsedMs: Math.max(0, monotonicNow() - timingStartedAt),
+              score: result.score.composite,
+              baselineValue: result.baselineValue,
+              steadyValue: result.steadyValue,
+              t0Offset: result.t0Offset,
+            });
+          }
+        } else {
+          stage.rejectedCandidateCount += 1;
+        }
+        if (key === currentKey) currentCandidate = result;
+        if (completedCandidateCount < adaptiveSearchBudget && Date.now() >= deadline) {
+          timedOut = true;
+          break;
+        }
       }
+      stage.elapsedMs = Math.max(0, monotonicNow() - stageStartedAt);
+      stages.push(stage);
+    }
+
+    evaluateStage("coarse", candidatePlan.candidates, SEARCH_POLICY.coarseCandidateBudget);
+
+    for (let roundIndex = 0; roundIndex < SEARCH_POLICY.refinementRounds.length && !timedOut && completedCandidateCount < adaptiveSearchBudget; roundIndex += 1) {
+      const round = SEARCH_POLICY.refinementRounds[roundIndex];
+      phaseStartedAt = monotonicNow();
+      const elites = selectDiverseEliteCandidates(evaluated, round.eliteCount, candidatePlan.bounds);
+      timings.candidateSelectionMs += monotonicNow() - phaseStartedAt;
+      if (!elites.length) break;
+      phaseStartedAt = monotonicNow();
+      const refinements = buildRefinementCandidates(elites, candidatePlan, round, roundIndex);
+      timings.candidateGenerationMs += monotonicNow() - phaseStartedAt;
+      generatedCandidateCount += refinements.length;
+      refinements.forEach((candidate) => generatedKeys.add(candidateKey(candidate)));
+      evaluateStage(round.name, refinements, round.budget);
+      if (!refinements.length) break;
+    }
+
+    const finalRound = SEARCH_POLICY.refinementRounds[SEARCH_POLICY.refinementRounds.length - 1];
+    for (let fillPass = 0; fillPass < 4 && finalRound && !timedOut && completedCandidateCount < adaptiveSearchBudget; fillPass += 1) {
+      phaseStartedAt = monotonicNow();
+      const finalElites = selectDiverseEliteCandidates(evaluated, 10 + fillPass * 2, candidatePlan.bounds);
+      timings.candidateSelectionMs += monotonicNow() - phaseStartedAt;
+      phaseStartedAt = monotonicNow();
+      const finalFill = buildRefinementCandidates(finalElites, candidatePlan, finalRound, SEARCH_POLICY.refinementRounds.length + fillPass, Math.pow(0.5, fillPass + 1));
+      timings.candidateGenerationMs += monotonicNow() - phaseStartedAt;
+      generatedCandidateCount += finalFill.length;
+      finalFill.forEach((candidate) => generatedKeys.add(candidateKey(candidate)));
+      const completedBeforeFill = completedCandidateCount;
+      evaluateStage(`refine-fill-${fillPass + 1}`, finalFill, adaptiveSearchBudget - completedCandidateCount);
+      if (completedCandidateCount === completedBeforeFill) break;
     }
 
     evaluated.sort((a, b) => a.score.composite - b.score.composite);
-    const bestCandidate = evaluated[0] || null;
-    const topCandidates = evaluated.slice(0, 5).map((entry, index) => summarizeCandidate(entry, index === 0));
+    const finalists = evaluated.slice(0, SEARCH_POLICY.fullResolutionFinalistCount);
+    const finalEvaluated = [];
+    if (!timedOut && finalists.length) {
+      const validationStage = {
+        name: "full-resolution-validation",
+        generatedCandidateCount: finalists.length,
+        uniqueUnseenCandidateCount: 0,
+        scheduledCandidateCount: finalists.length,
+        completedCandidateCount: 0,
+        validCandidateCount: 0,
+        rejectedCandidateCount: 0,
+        elapsedMs: 0,
+      };
+      const validationStartedAt = monotonicNow();
+      scheduledCandidateCount += finalists.length;
+      for (const finalist of finalists) {
+        if (Date.now() >= deadline) {
+          timedOut = true;
+          break;
+        }
+        const result = evaluateCandidate({
+          rows: sourceRows,
+          thicknessMm,
+          cropRange,
+          candidate: finalist,
+          label: finalist.label,
+          detailLevel: "final",
+          timeLagMode: input && input.timeLagMode,
+          deadline,
+          timings,
+        });
+        completedCandidateCount += 1;
+        validationStage.completedCandidateCount += 1;
+        if (result) {
+          finalEvaluated.push(result);
+          validationStage.validCandidateCount += 1;
+          if (candidateKey(result) === currentKey) currentCandidate = result;
+        } else {
+          validationStage.rejectedCandidateCount += 1;
+        }
+      }
+      validationStage.elapsedMs = Math.max(0, monotonicNow() - validationStartedAt);
+      stages.push(validationStage);
+    }
+    const finalRanking = finalEvaluated.length ? finalEvaluated.sort((a, b) => a.score.composite - b.score.composite) : evaluated;
+    const bestCandidate = finalRanking[0] || null;
+    const topCandidates = finalRanking.slice(0, 5).map((entry, index) => summarizeCandidate(entry, index === 0));
 
-    return buildReport({
+    const searchProgress = {
+      strategy: "adaptive-coarse-to-fine",
+      timedOut,
+      candidateBudget: SEARCH_POLICY.candidateLimit,
+      generatedCandidateCount,
+      uniqueCandidateCount: generatedKeys.size,
+      scheduledCandidateCount,
+      completedCandidateCount,
+      validCandidateCount: evaluated.length + finalEvaluated.length,
+      rejectedCandidateCount: completedCandidateCount - evaluated.length - finalEvaluated.length,
+      totalCandidateCount: scheduledCandidateCount,
+      elapsedMs: 0,
+      timeoutMs,
+      timings,
+      bestScoreProgression,
+      parameterCounts: candidatePlan.parameterCounts,
+      stages,
+      fullResolutionFinalistCount: finalEvaluated.length,
+    };
+    phaseStartedAt = monotonicNow();
+    const report = buildReport({
       sourceRows,
       currentState,
       cropRange,
@@ -102,7 +278,12 @@
       bestCandidate,
       topCandidates,
       rawChecks,
+      searchProgress,
     });
+    timings.reportMs += monotonicNow() - phaseStartedAt;
+    searchProgress.elapsedMs = Math.max(0, monotonicNow() - timingStartedAt);
+    timings.totalMs = searchProgress.elapsedMs;
+    return report;
   }
 
   function normalizeState(input) {
@@ -369,25 +550,173 @@
     }
 
     candidates.unshift(current);
-    return uniqueCandidates(candidates)
-      .sort((a, b) => candidateDistance(a, currentState) - candidateDistance(b, currentState))
-      .slice(0, SEARCH_POLICY.candidateLimit);
+    const generatedCandidateCount = candidates.length;
+    const unique = uniqueCandidates(candidates);
+    return {
+      candidates: unique,
+      generatedCandidateCount,
+      uniqueCandidateCount: unique.length,
+      parameterCounts: {
+        baseline: baselineCandidates.length,
+        steady: steadyCandidates.length,
+        t0: t0Candidates.length,
+      },
+      bounds: buildCandidateBounds(unique, rows, currentState),
+    };
   }
 
   function buildT0Candidates(rows, currentOffset) {
     const cleanRows = rows.filter((row) => Number.isFinite(row.time));
     if (!cleanRows.length) return [currentOffset || 0];
     const timeSpan = cleanRows[cleanRows.length - 1].time - cleanRows[0].time;
-    const range = clamp(Math.max(30, timeSpan * 0.12), 30, 180);
+    const range = clamp(Math.max(30, timeSpan * 0.12), 30, DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS);
     const step = clamp(Math.max(5, range / 6), 5, 20);
-    const base = Number.isFinite(currentOffset) ? currentOffset : 0;
+    const base = clamp(Number.isFinite(currentOffset) ? currentOffset : 0, -DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS, DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS);
     const candidates = [];
     for (let offset = -range; offset <= range + 1e-9; offset += step) {
-      candidates.push(base + offset);
+      candidates.push(clamp(base + offset, -DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS, DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS));
     }
     candidates.push(base);
-    [-30, -20, -10, 10, 20, 30].forEach((offset) => candidates.push(base + offset));
+    [-30, -20, -10, 10, 20, 30].forEach((offset) => {
+      candidates.push(clamp(base + offset, -DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS, DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS));
+    });
+    for (let offset = -DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS; offset <= DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS; offset += SEARCH_POLICY.globalT0Step) {
+      candidates.push(offset);
+    }
+    candidates.push(DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS);
     return candidates;
+  }
+
+  function buildCandidateBounds(candidates, rows, currentState) {
+    const currents = rows.map((row) => row.current).filter(Number.isFinite);
+    const observedMin = currents.length ? currents.reduce((minimum, value) => Math.min(minimum, value), Number.POSITIVE_INFINITY) : 0;
+    const observedMax = currents.length ? currents.reduce((maximum, value) => Math.max(maximum, value), Number.NEGATIVE_INFINITY) : 0;
+    const observedSpan = Math.max(observedMax - observedMin, 0);
+    const selectedSpan = Number.isFinite(currentState.baselineValue) && Number.isFinite(currentState.steadyValue)
+      ? Math.abs(currentState.steadyValue - currentState.baselineValue)
+      : 0;
+    const magnitudeScale = Math.max(currents.reduce((maximum, value) => Math.max(maximum, Math.abs(value)), 0), 1) * 1e-6;
+    const signalScale = Math.max(observedSpan, selectedSpan, magnitudeScale, Number.EPSILON);
+    const baselineValues = candidates.map((candidate) => candidate.baselineValue).filter(Number.isFinite);
+    const steadyValues = candidates.map((candidate) => candidate.steadyValue).filter(Number.isFinite);
+    const baselineMin = baselineValues.length ? Math.min(...baselineValues) : observedMin;
+    const baselineMax = baselineValues.length ? Math.max(...baselineValues) : observedMax;
+    const steadyMin = steadyValues.length ? Math.min(...steadyValues) : observedMin;
+    const steadyMax = steadyValues.length ? Math.max(...steadyValues) : observedMax;
+    return {
+      baseline: { min: baselineMin - signalScale * 0.1, max: baselineMax + signalScale * 0.1 },
+      steady: { min: steadyMin - signalScale * 0.1, max: steadyMax + signalScale * 0.2 },
+      t0: { min: -DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS, max: DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS },
+      signalScale,
+    };
+  }
+
+  function selectDiverseCandidates(candidates, limit, bounds, currentState) {
+    const pool = uniqueCandidates(candidates || []);
+    const count = Math.min(pool.length, Math.max(0, Math.floor(limit || 0)));
+    if (!count) return [];
+    const currentKey = candidateKey(currentState);
+    const current = pool.find((candidate) => candidateKey(candidate) === currentKey) || pool[0];
+    if (count === 1) return [current];
+    if (count === pool.length) {
+      return [current, ...pool.filter((candidate) => candidateKey(candidate) !== candidateKey(current))];
+    }
+    const selected = [current];
+    const remaining = pool
+      .filter((candidate) => candidateKey(candidate) !== candidateKey(current))
+      .map((candidate) => ({
+        candidate,
+        minimumDistance: normalizedCandidateDistance(candidate, current, bounds),
+      }));
+    while (selected.length < count) {
+      let nextIndex = -1;
+      let nextDistance = -1;
+      for (let index = 0; index < remaining.length; index += 1) {
+        if (remaining[index].minimumDistance > nextDistance) {
+          nextIndex = index;
+          nextDistance = remaining[index].minimumDistance;
+        }
+      }
+      if (nextIndex < 0) break;
+      const next = remaining[nextIndex].candidate;
+      remaining.splice(nextIndex, 1);
+      selected.push(next);
+      for (const entry of remaining) {
+        entry.minimumDistance = Math.min(entry.minimumDistance, normalizedCandidateDistance(entry.candidate, next, bounds));
+      }
+    }
+    return selected;
+  }
+
+  function selectDiverseEliteCandidates(results, limit, bounds) {
+    const ranked = (results || [])
+      .filter((result) => result && result.score && Number.isFinite(result.score.composite))
+      .slice()
+      .sort((a, b) => a.score.composite - b.score.composite);
+    const count = Math.min(ranked.length, Math.max(0, Math.floor(limit || 0)));
+    if (!count) return [];
+    const selected = [];
+    const selectedKeys = new Set();
+    for (const candidate of ranked) {
+      if (
+        !selected.length ||
+        selected.every((chosen) => normalizedCandidateDistance(candidate, chosen, bounds) >= SEARCH_POLICY.eliteMinDistance)
+      ) {
+        selected.push(candidate);
+        selectedKeys.add(candidateKey(candidate));
+      }
+      if (selected.length >= count) return selected;
+    }
+    for (const candidate of ranked) {
+      const key = candidateKey(candidate);
+      if (selectedKeys.has(key)) continue;
+      selected.push(candidate);
+      selectedKeys.add(key);
+      if (selected.length >= count) break;
+    }
+    return selected;
+  }
+
+  function normalizedCandidateDistance(a, b, bounds) {
+    if (!a || !b) return Number.POSITIVE_INFINITY;
+    const baselineSpan = Math.max((bounds && bounds.baseline && bounds.baseline.max - bounds.baseline.min) || 0, Number.EPSILON);
+    const steadySpan = Math.max((bounds && bounds.steady && bounds.steady.max - bounds.steady.min) || 0, Number.EPSILON);
+    const t0Span = Math.max((bounds && bounds.t0 && bounds.t0.max - bounds.t0.min) || 0, Number.EPSILON);
+    const baseline = (finiteOrFallback(a.baselineValue, 0) - finiteOrFallback(b.baselineValue, 0)) / baselineSpan;
+    const steady = (finiteOrFallback(a.steadyValue, 0) - finiteOrFallback(b.steadyValue, 0)) / steadySpan;
+    const t0 = (finiteOrFallback(a.t0Offset, 0) - finiteOrFallback(b.t0Offset, 0)) / t0Span;
+    return Math.sqrt(baseline * baseline + steady * steady + t0 * t0);
+  }
+
+  function buildRefinementCandidates(elites, candidatePlan, round, roundIndex, stepMultiplier) {
+    const multiplier = Number.isFinite(stepMultiplier) && stepMultiplier > 0 ? stepMultiplier : 1;
+    const bounds = candidatePlan.bounds;
+    const signalStep = Math.max(bounds.signalScale * round.signalStepFraction * multiplier, Number.EPSILON);
+    const t0Step = Math.max(round.t0Step * multiplier, 0.1);
+    const offsets = [-1, 0, 1];
+    const candidates = [];
+    for (const elite of elites) {
+      for (const baselineDirection of offsets) {
+        for (const steadyDirection of offsets) {
+          for (const t0Direction of offsets) {
+            const baselineValue = clamp(elite.baselineValue + baselineDirection * signalStep, bounds.baseline.min, bounds.baseline.max);
+            const steadyValue = clamp(elite.steadyValue + steadyDirection * signalStep, bounds.steady.min, bounds.steady.max);
+            const t0Offset = roundToStep(
+              clamp(elite.t0Offset + t0Direction * t0Step, bounds.t0.min, bounds.t0.max),
+              Math.min(t0Step, 0.1),
+            );
+            if (!Number.isFinite(baselineValue) || !Number.isFinite(steadyValue) || steadyValue <= baselineValue) continue;
+            candidates.push({
+              label: `refine-${roundIndex + 1}: ${formatKeyNumber(t0Offset)} / ${formatKeyNumber(baselineValue)} / ${formatKeyNumber(steadyValue)}`,
+              baselineValue,
+              steadyValue,
+              t0Offset,
+            });
+          }
+        }
+      }
+    }
+    return uniqueCandidates(candidates);
   }
 
   function evaluateCandidate(options) {
@@ -400,6 +729,8 @@
     const steadyValue = toFiniteNumber(candidate.steadyValue);
     const t0Offset = toFiniteNumber(candidate.t0Offset) || 0;
     const label = options.label || "candidate";
+    const timings = options.timings || null;
+    let phaseStartedAt = monotonicNow();
 
     if (!rows.length || !Number.isFinite(baselineValue) || !Number.isFinite(steadyValue) || steadyValue <= baselineValue) {
       return null;
@@ -408,8 +739,10 @@
     let candidateRows = applyTimeOffsetRows(rows, t0Offset, baselineValue);
     if (cropRange) candidateRows = candidateRows.filter((row) => row.time >= cropRange.start && row.time <= cropRange.end);
     candidateRows = sortRows(candidateRows.filter((row) => Number.isFinite(row.time) && Number.isFinite(row.current)));
+    addDiagnosticTiming(timings, "transformMs", monotonicNow() - phaseStartedAt);
     if (candidateRows.length < 4) return null;
 
+    phaseStartedAt = monotonicNow();
     const denom = steadyValue - baselineValue;
     const normalizedRows = candidateRows.map((row) => ({
       time: row.time,
@@ -426,11 +759,21 @@
     const centralWindow = selectCentralWindow(normalizedValid);
     const thicknessAvailable = Number.isFinite(thicknessMeters) && thicknessMeters > 0;
     const timeLagMode = getTimeLagModeConfig(options.timeLagMode);
+    addDiagnosticTiming(timings, "normalizationMs", monotonicNow() - phaseStartedAt);
+    phaseStartedAt = monotonicNow();
     const classical = normalizedAvailable && thicknessAvailable ? buildClassicalResults(normalizedRows, thicknessMeters, timeLagMode.id) : buildEmptyClassicalResults();
-    const fit = normalizedAvailable && thicknessAvailable ? buildFitResult(candidateRows, thicknessMm, baselineValue, steadyValue, t0Offset, timeLagMode.id) : buildEmptyFitResult();
-    const flatness = normalizedAvailable && thicknessAvailable ? evaluateFlatness(normalizedRows, thicknessMeters, centralWindow) : buildEmptyFlatness();
+    addDiagnosticTiming(timings, "classicalMethodsMs", monotonicNow() - phaseStartedAt);
+    phaseStartedAt = monotonicNow();
+    const fit = normalizedAvailable && thicknessAvailable ? buildFitResult(candidateRows, thicknessMm, baselineValue, steadyValue, t0Offset, timeLagMode.id, options.deadline) : buildEmptyFitResult();
+    addDiagnosticTiming(timings, "fixedFitMs", monotonicNow() - phaseStartedAt);
+    phaseStartedAt = monotonicNow();
+    const flatness = normalizedAvailable && thicknessAvailable ? evaluateFlatness(normalizedRows, thicknessMeters, centralWindow, options.deadline) : buildEmptyFlatness();
+    addDiagnosticTiming(timings, "flatnessMs", monotonicNow() - phaseStartedAt);
+    phaseStartedAt = monotonicNow();
     const plateau = evaluatePlateau(candidateRows, baselineValue, steadyValue);
     const monotonicity = evaluateMonotonicity(candidateRows);
+    addDiagnosticTiming(timings, "shapeChecksMs", monotonicNow() - phaseStartedAt);
+    phaseStartedAt = monotonicNow();
     const methodAgreement = evaluateMethodAgreement(classical, fit);
     const score = composeScore({
       methodAgreement,
@@ -445,6 +788,7 @@
       },
       snr: plateau.snr,
     });
+    addDiagnosticTiming(timings, "scoringMs", monotonicNow() - phaseStartedAt);
 
     return {
       label,
@@ -506,19 +850,19 @@
     };
   }
 
-  function evaluateFlatness(normalizedRows, thicknessMeters, window) {
+  function evaluateFlatness(normalizedRows, thicknessMeters, window, deadline) {
     const rows = (window && window.rows ? window.rows : []).filter((row) => Number.isFinite(row.time) && Number.isFinite(row.normalized));
     if (rows.length < 3 || !Number.isFinite(thicknessMeters) || thicknessMeters <= 0) {
       return buildEmptyFlatness();
     }
 
     const sampled = sampleEvenly(rows, SEARCH_POLICY.flatnessSampleRows);
-    const diffusivities = sampled
-      .map((row) => {
-        const value = solveApparentDiffusivity(row.normalized, row.time, thicknessMeters);
-        return Number.isFinite(value) ? value : null;
-      })
-      .filter(Number.isFinite);
+    const diffusivities = [];
+    for (const row of sampled) {
+      if (Number.isFinite(deadline) && Date.now() >= deadline) break;
+      const value = solveApparentDiffusivity(row.normalized, row.time, thicknessMeters, deadline);
+      if (Number.isFinite(value)) diffusivities.push(value);
+    }
     if (diffusivities.length < 3) {
       return buildEmptyFlatness();
     }
@@ -711,9 +1055,19 @@
     const raw = context.rawChecks || {};
     const topCandidates = Array.isArray(context.topCandidates) ? context.topCandidates : [];
     const findings = [];
+    const searchProgress = context.searchProgress || null;
+
+    if (searchProgress && searchProgress.timedOut) {
+      findings.push(makeFinding("warning", "Diagnostic timeout", buildDiagnosticTimeoutText(searchProgress)));
+    }
 
     if (raw.warnings && raw.warnings.length) {
       raw.warnings.forEach((message) => findings.push(makeFinding("warning", "Data quality", message)));
+    }
+    const rawExcursionCount = (raw.belowZeroCount || 0) + (raw.aboveOneCount || 0);
+    const rawExcursionFraction = raw.rowCount > 0 ? rawExcursionCount / raw.rowCount : 0;
+    if (rawExcursionFraction > 0.1) {
+      findings.push(makeFinding("warning", "Reference levels", `${rawExcursionCount} raw rows fall outside the selected baseline-to-steady-state interval.`));
     }
     if (best && best.methodAgreement && best.methodAgreement.note) {
       findings.push(makeFinding(best.methodAgreement.spread < 0.08 ? "ok" : "warning", "Method agreement", best.methodAgreement.note));
@@ -734,13 +1088,22 @@
     const currentSummary = summarizeCandidate(current, false);
     const bestSummary = summarizeCandidate(best, true);
     const bestText = buildBestText(bestSummary, raw);
+    const summary = searchProgress && searchProgress.timedOut
+      ? `${bestText} ${buildDiagnosticTimeoutText(searchProgress)}`.trim()
+      : bestText;
     const confidence = best ? clamp(100 - best.score.composite * 15, 0, 100) : 0;
-    const severity = confidence >= 75 ? "ok" : confidence >= 50 ? "warning" : "critical";
+    const severity = searchProgress && searchProgress.timedOut
+      ? "warning"
+      : confidence >= 75
+        ? "ok"
+        : confidence >= 50
+          ? "warning"
+          : "critical";
 
     return {
       hasData: !!(context.sourceRows && context.sourceRows.length),
       severity,
-      summary: bestText,
+      summary,
       confidence,
       current: currentSummary,
       best: bestSummary,
@@ -749,6 +1112,7 @@
       rawChecks: compactRawChecks(raw),
       comparison: buildComparison(current, best),
       recommendations: buildRecommendations(current, best, raw),
+      searchProgress,
       snapshot: {
         baselineValue: context.currentState.baselineValue,
         steadyValue: context.currentState.steadyValue,
@@ -756,6 +1120,13 @@
         cropRange: context.cropRange ? { start: context.cropRange.start, end: context.cropRange.end } : null,
       },
     };
+  }
+
+  function buildDiagnosticTimeoutText(searchProgress) {
+    const completed = Number.isFinite(searchProgress && searchProgress.completedCandidateCount) ? searchProgress.completedCandidateCount : 0;
+    const total = Number.isFinite(searchProgress && searchProgress.totalCandidateCount) ? searchProgress.totalCandidateCount : 0;
+    const timeoutSeconds = Number.isFinite(searchProgress && searchProgress.timeoutMs) ? Math.round(searchProgress.timeoutMs / 1000) : 30;
+    return `The diagnostic timed out at its ${timeoutSeconds}-second safety limit and used the best result from ${completed} of ${total} candidate combinations.`;
   }
 
   function compactRawChecks(raw) {
@@ -818,7 +1189,9 @@
     if (current && Number.isFinite(best.steadyValue) && Number.isFinite(current.steadyValue) && Math.abs(best.steadyValue - current.steadyValue) > Math.abs(current.steadyValue || 1) * 0.03) {
       messages.push("The selected steady-state level appears to be offset from the best self-consistent value.");
     }
-    if (best.flatness && best.flatness.available && best.flatness.score < 0.18 && best.methodAgreement && best.methodAgreement.spread < 0.08) {
+    const rawExcursionCount = raw ? (raw.belowZeroCount || 0) + (raw.aboveOneCount || 0) : 0;
+    const rawExcursionFraction = raw && raw.rowCount > 0 ? rawExcursionCount / raw.rowCount : 0;
+    if (best.flatness && best.flatness.available && best.flatness.score < 0.18 && best.methodAgreement && best.methodAgreement.spread < 0.08 && rawExcursionFraction <= 0.1) {
       messages.push("The data are consistent with a single effective Fickian diffusivity under the selected preprocessing.");
     } else if (best.flatness && best.flatness.available && best.flatness.score < 0.35) {
       messages.push("The data partially support a single effective Fickian diffusivity, but residual structure remains.");
@@ -864,12 +1237,12 @@
     const suggested = Number.isFinite(raw.risingTailSuggestedSteadyValue) ? raw.risingTailSuggestedSteadyValue : null;
     if (percent != null) {
       const suggestionText = suggested != null ? ` Suggested steady-state threshold: ${formatNumber(suggested)} current units.` : "";
-      return `We estimate the steady state is about ${formatNumber(percent)}% above the measured maximum.${suggestionText} The experiment may have been stopped too early. Consider setting the steady-state threshold higher.`;
+      return `The trace tail is still rising. We estimate the steady state is about ${formatNumber(percent)}% above the measured maximum.${suggestionText} The experiment may have been stopped too early. Consider setting the steady-state threshold higher.`;
     }
     if (suggested != null) {
-      return `We estimate the steady state is above the measured maximum. Suggested steady-state threshold: ${formatNumber(suggested)} current units. The experiment may have been stopped too early. Consider setting the steady-state threshold higher.`;
+      return `The trace tail is still rising. We estimate the steady state is above the measured maximum. Suggested steady-state threshold: ${formatNumber(suggested)} current units. The experiment may have been stopped too early. Consider setting the steady-state threshold higher.`;
     }
-    return "We estimate the steady state is above the measured maximum. The experiment may have been stopped too early. Consider setting the steady-state threshold higher.";
+    return "The trace tail is still rising. We estimate the steady state is above the measured maximum. The experiment may have been stopped too early. Consider setting the steady-state threshold higher.";
   }
 
   function summarizeCandidate(candidate, isBest) {
@@ -946,20 +1319,6 @@
   function candidateKey(candidate) {
     if (!candidate) return "";
     return [candidate.baselineValue, candidate.steadyValue, candidate.t0Offset].map((value) => formatKeyNumber(value)).join("|");
-  }
-
-  function candidateDistance(candidate, currentState) {
-    if (!candidate || !currentState) return Number.POSITIVE_INFINITY;
-    const baseline = Number.isFinite(candidate.baselineValue) && Number.isFinite(currentState.baselineValue)
-      ? Math.abs(candidate.baselineValue - currentState.baselineValue)
-      : 0;
-    const steady = Number.isFinite(candidate.steadyValue) && Number.isFinite(currentState.steadyValue)
-      ? Math.abs(candidate.steadyValue - currentState.steadyValue)
-      : 0;
-    const t0 = Number.isFinite(candidate.t0Offset) && Number.isFinite(currentState.t0Offset)
-      ? Math.abs(candidate.t0Offset - currentState.t0Offset)
-      : 0;
-    return baseline + steady + t0 * 0.25;
   }
 
   function uniqueCandidates(candidates) {
@@ -1122,7 +1481,7 @@
     return best;
   }
 
-  function buildFitResult(fitRows, thicknessMm, baselineValue, steadyValue, currentT0Offset, timeLagMode) {
+  function buildFitResult(fitRows, thicknessMm, baselineValue, steadyValue, currentT0Offset, timeLagMode, deadline) {
     const thicknessMeters = thicknessMm / 1000;
     if (!Number.isFinite(thicknessMeters) || thicknessMeters <= 0) {
       return { available: false, note: "The fit requires a valid membrane thickness." };
@@ -1133,7 +1492,9 @@
       return { available: false, note: prepared.error };
     }
 
-    const best = solveFixedFit(prepared, thicknessMeters, Date.now() + SOLVER_POLICY.timeoutMs, null, timeLagMode);
+    const localDeadline = Date.now() + SOLVER_POLICY.timeoutMs;
+    const solveDeadline = Number.isFinite(deadline) ? Math.min(deadline, localDeadline) : localDeadline;
+    const best = solveFixedFit(prepared, thicknessMeters, solveDeadline, null, timeLagMode);
     if (!best) {
       return { available: false, note: "No stable D fit could be found for the current Start Time Offset." };
     }
@@ -1162,8 +1523,8 @@
     const baselineValue = options ? options.baselineValue : null;
     const steadyValue = options ? options.steadyValue : null;
     const cropRange = options && options.cropRange ? options.cropRange : null;
-    const minOffset = options && Number.isFinite(options.minOffset) ? options.minOffset : -180;
-    const maxOffset = options && Number.isFinite(options.maxOffset) ? options.maxOffset : 180;
+    const minOffset = options && Number.isFinite(options.minOffset) ? options.minOffset : -FIT_TIME_OFFSET_LIMIT_SECONDS;
+    const maxOffset = options && Number.isFinite(options.maxOffset) ? options.maxOffset : FIT_TIME_OFFSET_LIMIT_SECONDS;
     const coarseStep = options && Number.isFinite(options.coarseStep) && options.coarseStep > 0 ? options.coarseStep : 1;
     const fineStep = options && Number.isFinite(options.fineStep) && options.fineStep > 0 ? options.fineStep : 0.1;
     const deadline = options && Number.isFinite(options.deadline) ? options.deadline : null;
@@ -1867,6 +2228,35 @@
     return Number(rounded.toFixed(decimals));
   }
 
+  function monotonicNow() {
+    if (typeof performance !== "undefined" && performance && typeof performance.now === "function") {
+      return performance.now();
+    }
+    return Date.now();
+  }
+
+  function createDiagnosticTimings() {
+    return {
+      rawChecksMs: 0,
+      candidateGenerationMs: 0,
+      candidateSelectionMs: 0,
+      transformMs: 0,
+      normalizationMs: 0,
+      classicalMethodsMs: 0,
+      fixedFitMs: 0,
+      flatnessMs: 0,
+      shapeChecksMs: 0,
+      scoringMs: 0,
+      reportMs: 0,
+      totalMs: 0,
+    };
+  }
+
+  function addDiagnosticTiming(timings, key, elapsedMs) {
+    if (!timings || !Object.prototype.hasOwnProperty.call(timings, key) || !Number.isFinite(elapsedMs)) return;
+    timings[key] += Math.max(0, elapsedMs);
+  }
+
   function getTimeLagModeConfig(modeId) {
     if (modeId && TIME_LAG_MODES[modeId]) return TIME_LAG_MODES[modeId];
     return TIME_LAG_MODES[DEFAULT_TIME_LAG_MODE];
@@ -1889,5 +2279,9 @@
     DEFAULT_TIME_LAG_MODE,
     TIME_LAG_MODES,
     getTimeLagModeConfig,
+    DIAGNOSTIC_CANDIDATE_LIMIT,
+    DIAGNOSTIC_TIME_OFFSET_LIMIT_SECONDS,
+    DIAGNOSTIC_TIMEOUT_MS,
+    FIT_TIME_OFFSET_LIMIT_SECONDS,
   };
 });

@@ -31,6 +31,7 @@
     dLower: 1e-16,
     dUpper: 1e-4,
   };
+  const FIT_TIME_OFFSET_LIMIT_SECONDS = 600;
   const DEFAULT_PLOT_COLORS = {
     current: "#2563eb",
     diffusion: "#111111",
@@ -212,6 +213,7 @@
         diagnosticSnapshot: document.getElementById("hpa-diagnostic-snapshot"),
         diagnosticFindings: document.getElementById("hpa-diagnostic-findings"),
         diagnosticCandidates: document.getElementById("hpa-diagnostic-candidates"),
+        diagnosticTelemetry: document.getElementById("hpa-diagnostic-telemetry"),
         diagnosticNotes: document.getElementById("hpa-diagnostic-notes"),
         citationDoiLink: document.getElementById("hpa-citation-doi-link"),
         citationBibtex: document.getElementById("hpa-citation-bibtex"),
@@ -2535,9 +2537,9 @@
       dom.fitOptimize.disabled = state.fitOptimizeBusy || !optimizable;
       dom.fitOptimize.innerHTML = state.fitOptimizeBusy ? "Running..." : "Optimize D<sub>GTF</sub>";
       dom.fitOptimize.title = state.fitOptimizeBusy
-        ? "Searching the full Start Time Offset range for the best RMSE."
+        ? `Searching the -${FIT_TIME_OFFSET_LIMIT_SECONDS} s to +${FIT_TIME_OFFSET_LIMIT_SECONDS} s GTF offset range for the best RMSE.`
         : optimizable
-          ? "Search the full Start Time Offset range for the best total Start Time Offset and fitted D by RMSE."
+          ? `Search the -${FIT_TIME_OFFSET_LIMIT_SECONDS} s to +${FIT_TIME_OFFSET_LIMIT_SECONDS} s GTF offset range for the best total Start Time Offset and fitted D by RMSE.`
           : "No Start Time Offset optimization is available for the current data.";
     }
   }
@@ -2558,10 +2560,6 @@
         const steadyValue = analysis.steady && Number.isFinite(analysis.steady.value) ? analysis.steady.value : null;
         const thicknessMm = Number.isFinite(analysis.thicknessMm) ? analysis.thicknessMm : null;
         const cropRange = parseRangeSpec(dom.cropRange ? dom.cropRange.value : "");
-        const minimum = parseNumberInput(dom.t0Offset.min);
-        const maximum = parseNumberInput(dom.t0Offset.max);
-        const coarseLower = Number.isFinite(minimum) ? minimum : -180;
-        const coarseUpper = Number.isFinite(maximum) ? maximum : 180;
         const sliderStep = parseNumberInput(dom.t0Offset.step);
         const fineStep = Number.isFinite(sliderStep) && sliderStep > 0 ? Math.min(sliderStep, 0.1) : 0.1;
         const best = optimizeFitAcrossTimeOffsets({
@@ -2571,8 +2569,8 @@
           steadyValue,
           timeLagMode: state.timeLagMode,
           cropRange,
-          minOffset: coarseLower,
-          maxOffset: coarseUpper,
+          minOffset: -FIT_TIME_OFFSET_LIMIT_SECONDS,
+          maxOffset: FIT_TIME_OFFSET_LIMIT_SECONDS,
           coarseStep: 1,
           fineStep,
           deadline: performance.now() + Math.max(SOLVER_POLICY.timeoutMs * 4, 12000),
@@ -3007,8 +3005,8 @@
       const steadyValue = options ? options.steadyValue : null;
       const timeLagMode = options ? options.timeLagMode : null;
       const cropRange = options && options.cropRange ? options.cropRange : null;
-      const minOffset = options && Number.isFinite(options.minOffset) ? options.minOffset : -180;
-      const maxOffset = options && Number.isFinite(options.maxOffset) ? options.maxOffset : 180;
+      const minOffset = options && Number.isFinite(options.minOffset) ? options.minOffset : -FIT_TIME_OFFSET_LIMIT_SECONDS;
+      const maxOffset = options && Number.isFinite(options.maxOffset) ? options.maxOffset : FIT_TIME_OFFSET_LIMIT_SECONDS;
       const coarseStep = options && Number.isFinite(options.coarseStep) && options.coarseStep > 0 ? options.coarseStep : 1;
       const fineStep = options && Number.isFinite(options.fineStep) && options.fineStep > 0 ? options.fineStep : 0.1;
       const deadline = options && Number.isFinite(options.deadline) ? options.deadline : null;
@@ -4902,8 +4900,20 @@
             t0Offset: parseNumberInput(dom.t0Offset ? dom.t0Offset.value : null) || 0,
             cropRange: parseRangeSpec(dom.cropRange ? dom.cropRange.value : ""),
             timeLagMode: state.timeLagMode,
+            timeoutMs: core.DIAGNOSTIC_TIMEOUT_MS,
           });
-          finish(report, report && report.best ? "ok" : "error", report && report.best ? "Diagnostic complete." : "Diagnostic complete with limited confidence.");
+          const progress = report && report.searchProgress;
+          if (progress && progress.timedOut) {
+            const completed = Number.isFinite(progress.completedCandidateCount) ? progress.completedCandidateCount : 0;
+            const total = Number.isFinite(progress.totalCandidateCount) ? progress.totalCandidateCount : 0;
+            finish(
+              report,
+              report && report.best ? "warning" : "error",
+              `Diagnostic timed out; using the best completed result (${completed} of ${total} candidates evaluated).`,
+            );
+          } else {
+            finish(report, report && report.best ? "ok" : "error", report && report.best ? "Diagnostic complete." : "Diagnostic complete with limited confidence.");
+          }
         } catch (error) {
           console.error(error);
           finish(null, "error", "Diagnostic failed.");
@@ -4936,7 +4946,7 @@
     if (dom.diagnosticBusyBanner) dom.diagnosticBusyBanner.hidden = !busy;
     if (dom.diagnosticBusyText) {
       dom.diagnosticBusyText.textContent = busy
-        ? "Working through the candidate settings now."
+        ? `Working through the candidate settings now. A ${getDiagnosticTimeoutSeconds()}-second safety stop will preserve the best completed result.`
         : "Ready.";
     }
     if (dom.diagnosticRunButton) {
@@ -4963,9 +4973,10 @@
       if (dom.diagnosticSnapshot) {
         dom.diagnosticSnapshot.textContent = state.diagnosticSnapshot ? "Snapshot stored. The diagnostic is currently analyzing the data." : "Capturing snapshot and analyzing the data.";
       }
-      if (dom.diagnosticNotes) dom.diagnosticNotes.textContent = "This can take a moment on larger datasets. The window is still working.";
+      if (dom.diagnosticNotes) dom.diagnosticNotes.textContent = `This can take a moment on larger datasets. If the ${getDiagnosticTimeoutSeconds()}-second safety limit is reached, Diagnostics will use the best completed candidate.`;
       if (dom.diagnosticFindings) dom.diagnosticFindings.innerHTML = "";
       if (dom.diagnosticCandidates) dom.diagnosticCandidates.innerHTML = "";
+      if (dom.diagnosticTelemetry) dom.diagnosticTelemetry.textContent = "Telemetry will appear when the diagnostic search completes.";
       return;
     }
 
@@ -4979,6 +4990,7 @@
       if (dom.diagnosticNotes) dom.diagnosticNotes.textContent = "Paste data or load a file, then run Diagnose to generate the score and candidate settings.";
       if (dom.diagnosticFindings) dom.diagnosticFindings.innerHTML = "";
       if (dom.diagnosticCandidates) dom.diagnosticCandidates.innerHTML = "";
+      if (dom.diagnosticTelemetry) dom.diagnosticTelemetry.textContent = "Telemetry appears after Diagnostics runs.";
       return;
     }
 
@@ -5008,6 +5020,18 @@
 
     if (dom.diagnosticNotes) {
       const notes = [];
+      if (report.searchProgress) {
+        const progress = report.searchProgress;
+        const completed = Number.isFinite(progress.completedCandidateCount) ? progress.completedCandidateCount : 0;
+        const total = Number.isFinite(progress.totalCandidateCount) ? progress.totalCandidateCount : 0;
+        const elapsedSeconds = Number.isFinite(progress.elapsedMs) ? progress.elapsedMs / 1000 : null;
+        const elapsedText = Number.isFinite(elapsedSeconds) ? ` in ${formatDiagnosticNumber(elapsedSeconds)} s` : "";
+        notes.push(
+          progress.timedOut
+            ? `Safety stop: ${completed} of ${total} diagnostic candidates were evaluated${elapsedText}; the best completed result is shown.`
+            : `Evaluated ${completed} of ${total} diagnostic candidates${elapsedText}.`,
+        );
+      }
       if (best && best.flatnessWindow) {
         notes.push(`Central flatness window: ${formatDiagnosticNumber(best.flatnessWindow.low * 100)}% to ${formatDiagnosticNumber(best.flatnessWindow.high * 100)}% of normalized signal.`);
       }
@@ -5037,6 +5061,52 @@
         .map((candidate, index) => renderDiagnosticCandidate(candidate, index === 0))
         .join("");
     }
+    if (dom.diagnosticTelemetry) {
+      dom.diagnosticTelemetry.innerHTML = renderDiagnosticTelemetry(report.searchProgress);
+    }
+  }
+
+  function renderDiagnosticTelemetry(progress) {
+    if (!progress) return "No search telemetry is available for this report.";
+    const parameterCounts = progress.parameterCounts || {};
+    const timings = progress.timings || {};
+    const stages = Array.isArray(progress.stages) ? progress.stages : [];
+    const progression = Array.isArray(progress.bestScoreProgression) ? progress.bestScoreProgression : [];
+    const strategyLabel = progress.strategy === "adaptive-coarse-to-fine" ? "Adaptive coarse-to-fine" : progress.strategy || "Unknown";
+    const formatMs = (value) => Number.isFinite(value) ? `${formatDiagnosticNumber(value)} ms` : "â€”";
+    const formatCount = (value) => escapeHtml(String(Number.isFinite(value) ? value : 0));
+    const timingParts = [
+      ["candidate generation", timings.candidateGenerationMs],
+      ["candidate selection", timings.candidateSelectionMs],
+      ["raw checks", timings.rawChecksMs],
+      ["time transformation", timings.transformMs],
+      ["normalization", timings.normalizationMs],
+      ["classical methods", timings.classicalMethodsMs],
+      ["GTF D fits (fixed references and t0)", timings.fixedFitMs],
+      ["D_app flatness", timings.flatnessMs],
+      ["shape checks", timings.shapeChecksMs],
+      ["scoring", timings.scoringMs],
+      ["report", timings.reportMs],
+    ].filter((entry) => Number.isFinite(entry[1]));
+    const progressionItems = progression.length
+      ? progression.map((entry) => `<li>${escapeHtml(entry.stage || "search")} #${escapeHtml(entry.completedCandidateCount)}: score ${escapeHtml(formatDiagnosticScore(entry.score))}, t0 ${escapeHtml(formatFitOffset(entry.t0Offset))} s, baseline ${escapeHtml(formatDiagnosticNumber(entry.baselineValue))}, steady ${escapeHtml(formatDiagnosticNumber(entry.steadyValue))}</li>`).join("")
+      : "<li>No valid score improvement was recorded.</li>";
+    return `
+      <div><strong>Strategy:</strong> ${escapeHtml(strategyLabel)}</div>
+      <div><strong>Parameter pools:</strong> ${formatCount(parameterCounts.baseline)} baseline x ${formatCount(parameterCounts.steady)} steady state x ${formatCount(parameterCounts.t0)} t0 values.</div>
+      <div><strong>Candidate flow:</strong> ${formatCount(progress.generatedCandidateCount)} generated; ${formatCount(progress.uniqueCandidateCount)} unique; ${formatCount(progress.scheduledCandidateCount)} scheduled from a budget of ${formatCount(progress.candidateBudget)}; ${formatCount(progress.completedCandidateCount)} evaluated; ${formatCount(progress.validCandidateCount)} valid; ${formatCount(progress.rejectedCandidateCount)} rejected.</div>
+      <div><strong>Final validation:</strong> ${formatCount(progress.fullResolutionFinalistCount)} finalists re-evaluated against all input rows.</div>
+      <div><strong>Stages:</strong> ${stages.length ? stages.map((stage) => `${escapeHtml(stage.name || "search")} ${formatCount(stage.completedCandidateCount)}/${formatCount(stage.scheduledCandidateCount)} in ${escapeHtml(formatMs(stage.elapsedMs))}`).join("; ") : "â€”"}.</div>
+      <div><strong>Total runtime:</strong> ${escapeHtml(formatMs(progress.elapsedMs))}${progress.timedOut ? " (timed out)" : ""}.</div>
+      <div><strong>Runtime breakdown:</strong> ${timingParts.map(([label, value]) => `${escapeHtml(label)} ${escapeHtml(formatMs(value))}`).join("; ")}.</div>
+      <details><summary>Best-score progression (${formatCount(progression.length)} improvements)</summary><ol>${progressionItems}</ol></details>
+    `;
+  }
+
+  function getDiagnosticTimeoutSeconds() {
+    const core = getDiagnosticCore();
+    const timeoutMs = core && Number.isFinite(core.DIAGNOSTIC_TIMEOUT_MS) ? core.DIAGNOSTIC_TIMEOUT_MS : 30000;
+    return Math.round(timeoutMs / 1000);
   }
 
   function describeReferenceSnapshot(snapshot) {
