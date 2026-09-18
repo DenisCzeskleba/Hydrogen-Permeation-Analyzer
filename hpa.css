@@ -1005,6 +1005,73 @@ body.dark #hpa-diagnostic-open:focus-visible {
   accent-color: var(--accent);
 }
 
+.hpa-axis-limits {
+  display: grid;
+  gap: 0.7rem;
+  width: 100%;
+  min-width: 340px;
+  padding-top: 0.85rem;
+  margin-top: 0.15rem;
+  border-top: 1px solid var(--line);
+}
+
+.hpa-axis-limits-header {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.hpa-axis-limits-title {
+  font-weight: 600;
+}
+
+.hpa-axis-limits-example {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.hpa-axis-limits-header .hpa-button {
+  margin-left: auto;
+  min-width: 4.8rem;
+}
+
+.hpa-axis-limit-row {
+  display: grid;
+  grid-template-columns: 3.1rem minmax(0, 1fr) 1.25rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.hpa-axis-limit-row > span {
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.hpa-axis-limit-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0.48rem 0.6rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.hpa-axis-limit-input[aria-invalid="true"] {
+  border-color: #b91c1c;
+}
+
+.hpa-axis-limits-status {
+  min-height: 1.1em;
+  max-width: 23rem;
+  color: #b91c1c;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.hpa-axis-limits-status:empty {
+  display: none;
+}
+
 .hpa-summary-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1207,6 +1274,14 @@ body.dark #hpa-diagnostic-open:focus-visible {
   pointer-events: none;
 }
 
+.hpa-plot-axis-frame {
+  fill: none;
+  stroke: var(--hpa-plot-ink);
+  stroke-width: 1;
+  pointer-events: none;
+  shape-rendering: crispEdges;
+}
+
 .hpa-plot-value {
   font-size: 11px;
   fill: var(--hpa-plot-ink);
@@ -1314,7 +1389,7 @@ body.dark #hpa-diagnostic-open:focus-visible {
 }
 
 .hpa-plot-axis-tick {
-  stroke: var(--hpa-plot-muted);
+  stroke: var(--hpa-plot-ink);
   stroke-width: 1;
   fill: none;
   shape-rendering: crispEdges;

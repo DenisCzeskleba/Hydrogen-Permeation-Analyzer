@@ -154,7 +154,7 @@ permalink: /hpa/
           <button type="button" class="hpa-button is-accent" id="hpa-diagnostic-open" data-action="open-diagnostic" title="Experimental: Run a diagnostic self-consistency check and suggest candidate settings.">Experimental: Diagnostics</button>
         </div>
         <div class="hpa-stage-controls">
-          <button type="button" class="hpa-button is-secondary" id="hpa-reset-plot" title="Reset the preview plot zoom and pan.">Reset</button>
+          <button type="button" class="hpa-button is-secondary" id="hpa-reset-plot" title="Reset the preview plot zoom, pan, and manual axis limits.">Reset</button>
           <details class="hpa-tool-panel is-accent">
             <summary class="hpa-button is-accent">Plot Options</summary>
             <div class="hpa-tool-panel-body">
@@ -214,6 +214,26 @@ permalink: /hpa/
               <input type="checkbox" id="hpa-diffusion-scale" />
               <span>Log Diffusion Axis</span>
             </label>
+            <div class="hpa-axis-limits" aria-labelledby="hpa-axis-limits-title">
+              <div class="hpa-axis-limits-header">
+                <span class="hpa-axis-limits-title" id="hpa-axis-limits-title">Axis limits</span>
+                <span class="hpa-axis-limits-example">(Accepts input 5.0e-5)</span>
+                <button type="button" class="hpa-button is-secondary" id="hpa-axis-limits-reset" title="Clear the manual y-axis limits and return both axes to automatic scaling.">Auto</button>
+              </div>
+              <div class="hpa-axis-limit-row">
+                <span>Left:</span>
+                <input id="hpa-diffusion-y-min" class="hpa-number hpa-axis-limit-input" type="text" inputmode="decimal" autocomplete="off" aria-label="Left axis minimum" title="Set the minimum diffusion-axis value. Scientific notation such as 5e-5 is accepted." />
+                <span>to</span>
+                <input id="hpa-diffusion-y-max" class="hpa-number hpa-axis-limit-input" type="text" inputmode="decimal" autocomplete="off" aria-label="Left axis maximum" title="Set the maximum diffusion-axis value. Scientific notation such as 5e-5 is accepted." />
+              </div>
+              <div class="hpa-axis-limit-row">
+                <span>Right:</span>
+                <input id="hpa-signal-y-min" class="hpa-number hpa-axis-limit-input" type="text" inputmode="decimal" autocomplete="off" aria-label="Right axis minimum" title="Set the minimum right-axis value. Scientific notation such as 5e-5 is accepted." />
+                <span>to</span>
+                <input id="hpa-signal-y-max" class="hpa-number hpa-axis-limit-input" type="text" inputmode="decimal" autocomplete="off" aria-label="Right axis maximum" title="Set the maximum right-axis value. Scientific notation such as 5e-5 is accepted." />
+              </div>
+              <div class="hpa-axis-limits-status" id="hpa-axis-limits-status" aria-live="polite"></div>
+            </div>
           </div>
         </details>
           <details class="hpa-tool-panel">
@@ -400,7 +420,7 @@ permalink: /hpa/
           <li>The baseline and steady-state fields define the normalization used by the analysis. If they are left blank, HPA starts from the minimum and maximum values in the loaded data.</li>
           <li>You can type baseline and steady-state values manually, or drag the reference lines directly on the plot while <strong>Signal representation</strong> is set to <strong>Current</strong>. In normalized mode the reference guides stay fixed at 0% and 100%, so the values remain editable from the <strong>Baseline</strong> panel.</li>
           <li>The <strong>Start Time Offset</strong> control shifts the trace over a range of -600 s to +600 s before analysis. A positive offset reconstructs a dense baseline segment before the transient and moves the measured data forward. A negative offset removes early time and shifts the remaining data back to zero.</li>
-          <li>Plot Options let you change the signal representation, choose the current display unit, choose colors for the main lines, decide how inverse-conditioning-based low-confidence diffusion segments are drawn, turn grid lines and minor grid lines on or off, and switch the diffusion axis between linear and logarithmic scaling.</li>
+          <li>Plot Options let you change the signal representation, choose the current display unit, choose colors for the main lines, decide how inverse-conditioning-based low-confidence diffusion segments are drawn, turn grid lines and minor grid lines on or off, switch the diffusion axis between linear and logarithmic scaling, and edit any individual y-axis bound. Use <strong>Auto</strong> to restore all automatically calculated limits.</li>
           <li>The <strong>Reset</strong> button restores the default plot view. The <strong>Hide/Show</strong> buttons toggle the reference markers without deleting their values.</li>
         </ul>
         <p>The plot itself is interactive. You can zoom and pan it directly, then use <strong>Reset</strong> to return to the default view. In current mode, dragging the baseline or steady-state line updates the corresponding value and reruns the analysis.</p>

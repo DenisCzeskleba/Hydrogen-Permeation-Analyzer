@@ -22,6 +22,7 @@
     "paper-tall": Object.freeze({ id: "paper-tall", width: 560, height: 560, legendPlacement: "below" }),
     custom: Object.freeze({ id: "custom", width: PLOT_WIDTH, height: PLOT_HEIGHT, legendPlacement: "auto" }),
   });
+  const PAPER_WIDE_TEXT_BOOST = 0.4;
   const SOLVER_POLICY = {
     minTerms: 3,
     maxTerms: 100,
@@ -120,6 +121,12 @@
     dragReferencePending: null,
     dragPlot: null,
     plotViewport: null,
+    plotAxisLimits: {
+      signalMin: null,
+      signalMax: null,
+      diffusionMin: null,
+      diffusionMax: null,
+    },
     plotHoverCache: null,
   };
 
@@ -168,6 +175,12 @@
       diffusionEdgeColor: document.getElementById("hpa-color-diffusion-edge"),
       fitColor: document.getElementById("hpa-color-fit"),
       diffusionScale: document.getElementById("hpa-diffusion-scale"),
+      diffusionYMin: document.getElementById("hpa-diffusion-y-min"),
+      diffusionYMax: document.getElementById("hpa-diffusion-y-max"),
+      signalYMin: document.getElementById("hpa-signal-y-min"),
+      signalYMax: document.getElementById("hpa-signal-y-max"),
+      axisLimitsReset: document.getElementById("hpa-axis-limits-reset"),
+      axisLimitsStatus: document.getElementById("hpa-axis-limits-status"),
       gridToggle: document.getElementById("hpa-grid-toggle"),
       resetPlot: document.getElementById("hpa-reset-plot"),
       fitToggle: document.getElementById("hpa-fit-toggle"),
@@ -391,12 +404,17 @@
       dom.plotSignalMode.addEventListener("change", () => {
         state.plotSignalMode = getPlotSignalMode(dom);
         state.plotViewport = null;
+        clearAxisLimitInputs(dom, "signal");
+        syncPlotAxisLimits(dom);
         syncSignalRepresentationControls(dom);
         renderDerivedViews(dom);
       });
     }
     if (dom.plotUnit) {
       dom.plotUnit.addEventListener("change", () => {
+        clearAxisLimitInputs(dom, "signal");
+        clearPlotViewportAxes("signal");
+        syncPlotAxisLimits(dom);
         renderDerivedViews(dom);
       });
     }
@@ -425,12 +443,53 @@
       dom.diffusionScale.addEventListener("change", () => {
         state.plotDiffusionScale = dom.diffusionScale.checked ? "log" : "linear";
         state.plotViewport = null;
+        syncPlotAxisLimits(dom);
+        renderDerivedViews(dom);
+      });
+    }
+    [dom.diffusionYMin, dom.diffusionYMax].forEach((element) => {
+      if (!element) return;
+      element.addEventListener("input", () => {
+        markAxisLimitManual(element);
+        clearPlotViewportAxes("diffusion");
+        syncPlotAxisLimits(dom);
+        renderDerivedViews(dom);
+      });
+      element.addEventListener("change", () => {
+        if (!String(element.value || "").trim()) markAxisLimitAuto(element);
+        clearPlotViewportAxes("diffusion");
+        syncPlotAxisLimits(dom);
+        renderDerivedViews(dom);
+      });
+    });
+    [dom.signalYMin, dom.signalYMax].forEach((element) => {
+      if (!element) return;
+      element.addEventListener("input", () => {
+        markAxisLimitManual(element);
+        clearPlotViewportAxes("signal");
+        syncPlotAxisLimits(dom);
+        renderDerivedViews(dom);
+      });
+      element.addEventListener("change", () => {
+        if (!String(element.value || "").trim()) markAxisLimitAuto(element);
+        clearPlotViewportAxes("signal");
+        syncPlotAxisLimits(dom);
+        renderDerivedViews(dom);
+      });
+    });
+    if (dom.axisLimitsReset) {
+      dom.axisLimitsReset.addEventListener("click", () => {
+        clearAxisLimitInputs(dom, "all");
+        state.plotViewport = null;
+        syncPlotAxisLimits(dom);
         renderDerivedViews(dom);
       });
     }
     if (dom.resetPlot) {
       dom.resetPlot.addEventListener("click", () => {
+        clearAxisLimitInputs(dom, "all");
         state.plotViewport = null;
+        syncPlotAxisLimits(dom);
         renderDerivedViews(dom);
       });
     }
@@ -516,6 +575,8 @@
       dom.lowConfidence.value = "shaded";
     }
     syncSignalRepresentationControls(dom);
+    syncPlotAxisLimits(dom);
+    syncPlotAxisLimitDisplay(dom, null);
     syncPlotColorControls(dom, state.plotColors);
     applyPlotColorVars(dom);
     syncExportControls(dom);
@@ -1678,6 +1739,163 @@
     return { xMin, xMax, yMin, yMax, diffusionYMin, diffusionYMax };
   }
 
+  function emptyPlotAxisLimits() {
+    return {
+      signalMin: null,
+      signalMax: null,
+      diffusionMin: null,
+      diffusionMax: null,
+    };
+  }
+
+  function isAxisLimitManual(element) {
+    return !!(element && element.dataset && element.dataset.hpaAxisLimitMode === "manual");
+  }
+
+  function markAxisLimitManual(element) {
+    if (!element || !element.dataset) return;
+    element.dataset.hpaAxisLimitMode = "manual";
+  }
+
+  function markAxisLimitAuto(element) {
+    if (!element || !element.dataset) return;
+    element.dataset.hpaAxisLimitMode = "auto";
+  }
+
+  function setAxisLimitAutoValue(element, value) {
+    if (!element || isAxisLimitManual(element)) return;
+    markAxisLimitAuto(element);
+    element.value = Number.isFinite(value) ? formatAxisLimitInputValue(value) : "";
+  }
+
+  function formatAxisLimitInputValue(value) {
+    if (!Number.isFinite(value)) return "";
+    return Number(value.toPrecision(6)).toString();
+  }
+
+  function setAxisLimitValidity(element, valid) {
+    if (!element) return;
+    if (valid) element.removeAttribute("aria-invalid");
+    else element.setAttribute("aria-invalid", "true");
+  }
+
+  function syncPlotAxisLimits(dom) {
+    const limits = emptyPlotAxisLimits();
+    const messages = [];
+    const validity = new Map();
+    const logDiffusion = !!(dom && dom.diffusionScale && dom.diffusionScale.checked);
+    const entries = [
+      { key: "diffusionMin", element: dom && dom.diffusionYMin, positive: logDiffusion },
+      { key: "diffusionMax", element: dom && dom.diffusionYMax, positive: logDiffusion },
+      { key: "signalMin", element: dom && dom.signalYMin, positive: false },
+      { key: "signalMax", element: dom && dom.signalYMax, positive: false },
+    ];
+
+    entries.forEach((entry) => {
+      const manual = isAxisLimitManual(entry.element);
+      const value = parseNumberInput(entry.element ? entry.element.value : null);
+      let valid = true;
+      if (manual && value == null) {
+        valid = false;
+        messages.push("Enter a numeric value, or use Auto.");
+      } else if (manual && entry.positive && !(value > 0)) {
+        valid = false;
+        messages.push("Logarithmic diffusion limits must be greater than zero.");
+      }
+      validity.set(entry.element, valid);
+      if (manual && valid) limits[entry.key] = value;
+    });
+
+    [
+      { minKey: "diffusionMin", maxKey: "diffusionMax", minElement: dom && dom.diffusionYMin, maxElement: dom && dom.diffusionYMax },
+      { minKey: "signalMin", maxKey: "signalMax", minElement: dom && dom.signalYMin, maxElement: dom && dom.signalYMax },
+    ].forEach((pair) => {
+      const min = parseNumberInput(pair.minElement ? pair.minElement.value : null);
+      const max = parseNumberInput(pair.maxElement ? pair.maxElement.value : null);
+      if (min == null || max == null || max > min) return;
+      messages.push("Each maximum must be greater than its minimum.");
+      if (isAxisLimitManual(pair.minElement)) {
+        validity.set(pair.minElement, false);
+        limits[pair.minKey] = null;
+      }
+      if (isAxisLimitManual(pair.maxElement)) {
+        validity.set(pair.maxElement, false);
+        limits[pair.maxKey] = null;
+      }
+    });
+
+    entries.forEach((entry) => setAxisLimitValidity(entry.element, validity.get(entry.element) !== false));
+    state.plotAxisLimits = limits;
+    if (dom && dom.axisLimitsStatus) {
+      dom.axisLimitsStatus.textContent = dedupe(messages).join(" ");
+    }
+    return messages.length === 0;
+  }
+
+  function clearAxisLimitInputs(dom, axis) {
+    if (!dom) return;
+    if (axis === "diffusion" || axis === "all") {
+      [dom.diffusionYMin, dom.diffusionYMax].forEach((element) => {
+        if (!element) return;
+        element.value = "";
+        markAxisLimitAuto(element);
+      });
+    }
+    if (axis === "signal" || axis === "all") {
+      [dom.signalYMin, dom.signalYMax].forEach((element) => {
+        if (!element) return;
+        element.value = "";
+        markAxisLimitAuto(element);
+      });
+    }
+  }
+
+  function clearPlotViewportAxes(axis) {
+    if (!state.plotViewport) return;
+    const next = { ...state.plotViewport };
+    if (axis === "signal" || axis === "all") {
+      delete next.yMin;
+      delete next.yMax;
+    }
+    if (axis === "diffusion" || axis === "all") {
+      delete next.diffusionYMin;
+      delete next.diffusionYMax;
+    }
+    state.plotViewport = Object.values(next).some((value) => Number.isFinite(value)) ? next : null;
+  }
+
+  function syncPlotAxisLimitDisplay(dom, analysis) {
+    if (!dom) return;
+    let signalMin = null;
+    let signalMax = null;
+    let diffusionMin = null;
+    let diffusionMax = null;
+    if (analysis && analysis.rows && analysis.rows.length) {
+      const inputUnit = dom.currentUnit ? dom.currentUnit.value : "A";
+      const displayUnit = getDisplayUnit(dom);
+      const signalMode = getPlotSignalMode(dom);
+      const diffusionScaleMode = state.plotDiffusionScale || "linear";
+      const ranges = getPlotRanges(analysis, inputUnit, displayUnit, diffusionScaleMode, signalMode);
+      signalMin = ranges.yMin;
+      signalMax = ranges.yMax;
+
+      const diffusionBaseRanges = getDiffusionBaseRanges(analysis);
+      const diffusionAxis = getDiffusionAxisScaleForPlot(diffusionBaseRanges);
+      diffusionMin = diffusionScaleMode === "log"
+        ? Math.pow(10, ranges.diffusionYMin) * diffusionAxis.factor
+        : ranges.diffusionYMin * diffusionAxis.factor;
+      diffusionMax = diffusionScaleMode === "log"
+        ? Math.pow(10, ranges.diffusionYMax) * diffusionAxis.factor
+        : ranges.diffusionYMax * diffusionAxis.factor;
+    }
+
+    setAxisLimitAutoValue(dom.diffusionYMin, diffusionMin);
+    setAxisLimitAutoValue(dom.diffusionYMax, diffusionMax);
+    setAxisLimitAutoValue(dom.signalYMin, signalMin);
+    setAxisLimitAutoValue(dom.signalYMax, signalMax);
+    syncPlotAxisLimits(dom);
+  }
+
   function getCurrentPlotRanges(analysis, inputUnit, displayUnit) {
     const rows = analysis && analysis.rows ? analysis.rows : [];
     const points = rows
@@ -1691,12 +1909,12 @@
     }
 
     const base = getBasePlotRanges(points);
-    if (!state.plotViewport) return base;
-
-    const xMin = Number.isFinite(state.plotViewport.xMin) ? state.plotViewport.xMin : base.xMin;
-    const xMax = Number.isFinite(state.plotViewport.xMax) ? state.plotViewport.xMax : base.xMax;
-    const yMin = Number.isFinite(state.plotViewport.yMin) ? state.plotViewport.yMin : base.yMin;
-    const yMax = Number.isFinite(state.plotViewport.yMax) ? state.plotViewport.yMax : base.yMax;
+    const viewport = state.plotViewport || {};
+    const limits = state.plotAxisLimits || emptyPlotAxisLimits();
+    const xMin = Number.isFinite(viewport.xMin) ? viewport.xMin : base.xMin;
+    const xMax = Number.isFinite(viewport.xMax) ? viewport.xMax : base.xMax;
+    const yMin = Number.isFinite(limits.signalMin) ? limits.signalMin : Number.isFinite(viewport.yMin) ? viewport.yMin : base.yMin;
+    const yMax = Number.isFinite(limits.signalMax) ? limits.signalMax : Number.isFinite(viewport.yMax) ? viewport.yMax : base.yMax;
     if (xMax <= xMin || yMax <= yMin) return base;
     return { xMin, xMax, yMin, yMax };
   }
@@ -1704,7 +1922,7 @@
   function getPlotRanges(analysis, inputUnit, displayUnit, diffusionScaleMode, signalMode) {
     const currentRanges = getSignalPlotRanges(analysis, inputUnit, displayUnit, signalMode);
     const diffusionBaseRanges = getDiffusionBaseRanges(analysis);
-    const diffusionAxis = getDiffusionAxisScale(diffusionBaseRanges);
+    const diffusionAxis = getDiffusionAxisScaleForPlot(diffusionBaseRanges);
     const diffusionRanges = getDiffusionPlotRanges(analysis, diffusionScaleMode, diffusionAxis.factor);
     return {
       xMin: currentRanges.xMin,
@@ -1764,13 +1982,18 @@
       return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
     }
     const base = getBasePlotRanges(preparedPoints);
-    if (!state.plotViewport) {
-      return base;
-    }
-    const xMin = Number.isFinite(state.plotViewport.xMin) ? state.plotViewport.xMin : base.xMin;
-    const xMax = Number.isFinite(state.plotViewport.xMax) ? state.plotViewport.xMax : base.xMax;
-    const yMin = Number.isFinite(state.plotViewport.diffusionYMin) ? state.plotViewport.diffusionYMin : base.yMin;
-    const yMax = Number.isFinite(state.plotViewport.diffusionYMax) ? state.plotViewport.diffusionYMax : base.yMax;
+    const viewport = state.plotViewport || {};
+    const limits = state.plotAxisLimits || emptyPlotAxisLimits();
+    const manualMin = Number.isFinite(limits.diffusionMin)
+      ? scaleMode === "log" ? Math.log10(limits.diffusionMin / safeFactor) : limits.diffusionMin / safeFactor
+      : null;
+    const manualMax = Number.isFinite(limits.diffusionMax)
+      ? scaleMode === "log" ? Math.log10(limits.diffusionMax / safeFactor) : limits.diffusionMax / safeFactor
+      : null;
+    const xMin = Number.isFinite(viewport.xMin) ? viewport.xMin : base.xMin;
+    const xMax = Number.isFinite(viewport.xMax) ? viewport.xMax : base.xMax;
+    const yMin = Number.isFinite(manualMin) ? manualMin : Number.isFinite(viewport.diffusionYMin) ? viewport.diffusionYMin : base.yMin;
+    const yMax = Number.isFinite(manualMax) ? manualMax : Number.isFinite(viewport.diffusionYMax) ? viewport.diffusionYMax : base.yMax;
     if (xMax <= xMin || yMax <= yMin) {
       return base;
     }
@@ -1787,6 +2010,17 @@
       exponent,
       factor: Math.pow(10, exponent),
     };
+  }
+
+  function getDiffusionAxisScaleForPlot(baseRanges) {
+    const limits = state.plotAxisLimits || emptyPlotAxisLimits();
+    if (Number.isFinite(limits.diffusionMin) || Number.isFinite(limits.diffusionMax)) {
+      return getDiffusionAxisScale({
+        yMin: Number.isFinite(limits.diffusionMin) ? limits.diffusionMin : baseRanges.yMin,
+        yMax: Number.isFinite(limits.diffusionMax) ? limits.diffusionMax : baseRanges.yMax,
+      });
+    }
+    return getDiffusionAxisScale(baseRanges);
   }
 
   function scaleDiffusionRanges(ranges, factor) {
@@ -3465,7 +3699,7 @@
     const orderedSmoothedDiffusion = smoothedDiffusionPoints.slice().sort((a, b) => a.x - b.x);
     const signalRanges = getSignalPlotRanges(analysis, inputUnit, displayUnit, signalMode);
     const diffusionBaseRanges = getDiffusionBaseRanges(analysis);
-    const diffusionAxis = getDiffusionAxisScale(diffusionBaseRanges);
+    const diffusionAxis = getDiffusionAxisScaleForPlot(diffusionBaseRanges);
     const diffusionRanges = getDiffusionPlotRanges(analysis, diffusionScaleMode, diffusionAxis.factor);
     const orderedScaledDiffusion = orderedDiffusion
       .map((point) => ({
@@ -3839,19 +4073,20 @@
     bindLegendTooltip(dom);
   }
 
-  function buildPlotMetrics(width, height, profile) {
+  function buildPlotMetrics(width, height, profile, textBoost = 0) {
     const baseArea = Math.max(PLOT_WIDTH * PLOT_HEIGHT, 1);
     const areaScale = Math.sqrt((Math.max(width, 1) * Math.max(height, 1)) / baseArea);
     const exportScale = profile === "live" ? 1 : clamp(areaScale, 0.94, 1.16);
     const compactScale = profile === "live" ? 1 : clamp(Math.min(width / PLOT_WIDTH, height / PLOT_HEIGHT), 0.9, 1.1);
+    const lineWidth = roundToStep(2.4 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.1)), 0.1);
     return {
-      axisLabelFontSize: roundToStep(11 * (profile === "live" ? 1 : clamp(exportScale, 0.97, 1.08)), 0.1),
-      axisSubFontSize: roundToStep(8 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.08)), 0.1),
-      valueFontSize: roundToStep(11 * (profile === "live" ? 1 : clamp(compactScale, 0.98, 1.06)), 0.1),
-      noteFontSize: roundToStep(11 * (profile === "live" ? 1 : clamp(compactScale, 0.98, 1.06)), 0.1),
-      legendFontSize: roundToStep(10.5 * (profile === "live" ? 1 : clamp(exportScale, 0.97, 1.08)), 0.1),
-      legendSubFontSize: roundToStep(8 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.08)), 0.1),
-      lineWidth: roundToStep(2.4 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.1)), 0.1),
+      axisLabelFontSize: roundToStep(11 * (profile === "live" ? 1 : clamp(exportScale, 0.97, 1.08)) + textBoost, 0.1),
+      axisSubFontSize: roundToStep(8 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.08)) + textBoost, 0.1),
+      valueFontSize: roundToStep(11 * (profile === "live" ? 1 : clamp(compactScale, 0.98, 1.06)) + textBoost, 0.1),
+      noteFontSize: roundToStep(11 * (profile === "live" ? 1 : clamp(compactScale, 0.98, 1.06)) + textBoost, 0.1),
+      legendFontSize: roundToStep(10.5 * (profile === "live" ? 1 : clamp(exportScale, 0.97, 1.08)) + textBoost, 0.1),
+      legendSubFontSize: roundToStep(8 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.08)) + textBoost, 0.1),
+      lineWidth,
       legendLineStrokeWidth: roundToStep(2.2 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.1)), 0.1),
       refLineWidth: roundToStep(1 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.08)), 0.1),
       frameWidth: roundToStep(0.5 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.12)), 0.1),
@@ -3865,13 +4100,17 @@
       legendRowGap: profile === "live" ? 0 : Math.round(clamp(8 * exportScale, 6, 12)),
       legendLineY: roundToStep(6 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.08)), 0.1),
       legendTextY: roundToStep(10 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.08)), 0.1),
-      legendRowHeight: roundToStep(Math.max(14, 10 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.08)) + 4), 0.1),
+      legendRowHeight: roundToStep(Math.max(14, 10 * (profile === "live" ? 1 : clamp(exportScale, 0.96, 1.08)) + 4 + textBoost), 0.1),
       tickMinorLength: profile === "live" ? 4 : Math.round(clamp(4 * compactScale, 4, 6)),
       tickMajorLength: profile === "live" ? 6 : Math.round(clamp(6 * compactScale, 6, 8)),
       leftMinorTickLength: profile === "live" ? 3 : Math.round(clamp(3 * compactScale, 3, 5)),
       leftMajorTickLength: profile === "live" ? 4 : Math.round(clamp(4 * compactScale, 4, 6)),
+      rightMinorTickLength: profile === "live" ? 3 : Math.round(clamp(3 * compactScale, 3, 5)),
       rightTickLength: profile === "live" ? 4 : Math.round(clamp(4 * compactScale, 4, 6)),
+      axisLineWidth: 1,
       clipId: profile === "live" ? "hpa-plot-clip" : "hpa-export-plot-clip",
+      signalClipId: profile === "live" ? "hpa-plot-signal-clip" : "hpa-export-plot-signal-clip",
+      signalClipPadding: lineWidth / 2,
     };
   }
 
@@ -4001,20 +4240,25 @@
     };
   }
 
-  function resolveExportPlotLayout(width, height, legendItems, metrics, legendPlacement) {
+  function resolveExportPlotLayout(width, height, legendItems, metrics, legendPlacement, presetId) {
     const compact = width < 680 || width / Math.max(height, 1) < 1.75;
-    const left = Math.round(clamp(compact ? width * 0.13 : width * 0.095, 58, 84));
-    const right = Math.round(clamp(compact ? width * 0.12 : width * 0.08, 50, 74));
-    const topPadding = Math.round(clamp(height * 0.055, 18, 32));
+    const tightPaperWide = presetId === "paper-wide";
+    const paperWideEdgePadding = 3;
+    const left = tightPaperWide ? 36.7 : Math.round(clamp(compact ? width * 0.13 : width * 0.095, 58, 84));
+    const right = tightPaperWide ? 36.5 : Math.round(clamp(compact ? width * 0.12 : width * 0.08, 50, 74));
+    const topPadding = tightPaperWide ? 1 : Math.round(clamp(height * 0.055, 18, 32));
     const tickReserve = Math.round(clamp(metrics.valueFontSize + metrics.tickMajorLength + 8, 22, 30));
     const xLabelReserve = Math.round(clamp(metrics.axisLabelFontSize + 10, 20, 30));
-    const legendRowsPacked = packLegendRows(legendItems, Math.max(220, width - 32), metrics.legendGap);
+    const tightXAxisGap = Math.round(clamp(metrics.axisLabelFontSize + 5, 15, 19));
+    const legendMaxWidth = tightPaperWide ? width - left - right : width - 32;
+    const legendPackingTolerance = tightPaperWide ? 12 : 0;
+    const legendRowsPacked = packLegendRows(legendItems, Math.max(220, legendMaxWidth + legendPackingTolerance), metrics.legendGap);
     const legendBlockHeight = legendRowsPacked.length
       ? legendRowsPacked.length * metrics.legendRowHeight + (legendRowsPacked.length - 1) * metrics.legendRowGap
       : 0;
-    const baseBottomReserve = tickReserve + xLabelReserve + 10;
+    const baseBottomReserve = tightPaperWide ? tickReserve + tightXAxisGap + 1 : tickReserve + xLabelReserve + 10;
     const legendBelow = legendPlacement === "below";
-    const chartY = legendBelow ? topPadding : topPadding + legendBlockHeight + 10;
+    const chartY = legendBelow ? topPadding : topPadding + legendBlockHeight + (tightPaperWide ? 7 : 10);
     const bottomReserve = legendBelow ? baseBottomReserve + legendBlockHeight + 16 : baseBottomReserve;
     const chartWidth = width - left - right;
     const chartHeight = height - chartY - bottomReserve;
@@ -4027,13 +4271,21 @@
       legendRows: legendRowsPacked.map((row, index) => ({
         items: row.items,
         width: row.width,
-        x: Math.max(8, (width - row.width) / 2),
+        x: tightPaperWide ? left + Math.max(0, (chartWidth - row.width) / 2) : Math.max(8, (width - row.width) / 2),
         y: legendStartY + index * (metrics.legendRowHeight + metrics.legendRowGap),
       })),
-      axisLabelLeftX: Math.max(metrics.axisLabelFontSize + 6, left - (metrics.axisLabelFontSize + 18)),
-      axisLabelRightX: width - Math.max(6, right - (metrics.axisLabelFontSize + 18)),
+      axisLabelLeftX: tightPaperWide
+        ? metrics.axisLabelFontSize + paperWideEdgePadding
+        : Math.max(metrics.axisLabelFontSize + 6, left - (metrics.axisLabelFontSize + 18)),
+      axisLabelRightX: tightPaperWide
+        ? width - paperWideEdgePadding - 2
+        : width - Math.max(6, right - (metrics.axisLabelFontSize + 18)),
       xTickLabelY: chartY + chartHeight + tickReserve - 5,
-      xAxisLabelY: legendBelow ? height - legendBlockHeight - 14 : height - 6,
+      xAxisLabelY: legendBelow
+        ? height - legendBlockHeight - 14
+        : tightPaperWide
+          ? chartY + chartHeight + tickReserve - 5 + tightXAxisGap
+          : height - 6,
     };
   }
 
@@ -4082,10 +4334,11 @@
         .hpa-plot-axis-left,.hpa-plot-value-diffusion{fill:${tokens.diffusionColor}}
         .hpa-plot-axis-right,.hpa-plot-value-current{fill:${tokens.currentColor}}
         .hpa-plot-frame{fill:${tokens.bg};stroke:${tokens.border};stroke-width:${metrics.frameWidth};pointer-events:none}
+        .hpa-plot-axis-frame{fill:none;stroke:${tokens.ink};stroke-width:${metrics.axisLineWidth};pointer-events:none;shape-rendering:crispEdges}
         .hpa-plot-ref-line{stroke-width:${metrics.refLineWidth};stroke-linecap:round;fill:none}
         .hpa-plot-ref-line.hpa-plot-ref-baseline,.hpa-plot-ref-label.hpa-plot-ref-baseline{stroke:#4b5563;fill:#4b5563;color:#4b5563}
         .hpa-plot-ref-line.hpa-plot-ref-steady,.hpa-plot-ref-label.hpa-plot-ref-steady{stroke:#111111;fill:#111111;color:#111111}
-        .hpa-plot-axis-tick{stroke:${tokens.muted};stroke-width:1;fill:none;shape-rendering:crispEdges}
+        .hpa-plot-axis-tick{stroke:${tokens.ink};stroke-width:1;fill:none;shape-rendering:crispEdges}
         .hpa-plot-axis-tick-minor{stroke-width:0.75;opacity:0.8}
       </style>
     `;
@@ -4134,7 +4387,7 @@
     const orderedSmoothedDiffusion = smoothedDiffusionPoints.slice().sort((a, b) => a.x - b.x);
     const signalRanges = getSignalPlotRanges(analysis, inputUnit, displayUnit, signalMode);
     const diffusionBaseRanges = getDiffusionBaseRanges(analysis);
-    const diffusionAxis = getDiffusionAxisScale(diffusionBaseRanges);
+    const diffusionAxis = getDiffusionAxisScaleForPlot(diffusionBaseRanges);
     const diffusionRanges = getDiffusionPlotRanges(analysis, diffusionScaleMode, diffusionAxis.factor);
     const orderedScaledDiffusion = orderedDiffusion
       .map((point) => ({
@@ -4169,6 +4422,7 @@
     const xTicks = buildNiceTicks(signalRanges.xMin, signalRanges.xMax, 5);
     const xMinorTicks = buildLinearMinorTicks(signalRanges.xMin, signalRanges.xMax, xTicks, 4);
     const signalTicks = buildNiceTicks(signalRanges.yMin, signalRanges.yMax, 5);
+    const signalMinorTicks = buildLinearMinorTicks(signalRanges.yMin, signalRanges.yMax, signalTicks, 4);
     const diffusionMajorTicks =
       diffusionScaleMode === "log"
         ? buildLogTicks(diffusionRanges.yMin, diffusionRanges.yMax)
@@ -4181,6 +4435,7 @@
     const xTicksVisible = xTicks.filter((value) => within(value, signalRanges.xMin, signalRanges.xMax));
     const xMinorTicksVisible = xMinorTicks.filter((value) => within(value, signalRanges.xMin, signalRanges.xMax));
     const signalTicksVisible = signalTicks.filter((value) => within(value, signalRanges.yMin, signalRanges.yMax));
+    const signalMinorTicksVisible = signalMinorTicks.filter((value) => within(value, signalRanges.yMin, signalRanges.yMax));
     const diffusionMajorTicksVisible = diffusionMajorTicks.filter((value) => within(value, diffusionRanges.yMin, diffusionRanges.yMax));
     const diffusionMinorTicksVisible = diffusionMinorTicks.filter((value) => within(value, diffusionRanges.yMin, diffusionRanges.yMax));
     const fit = analysis.fit;
@@ -4188,7 +4443,8 @@
     const fitOverlayPoints = fitVisible
       ? buildFitOverlayPoints(analysis, fit, signalMode, inputUnit, displayUnit, signalRanges)
       : [];
-    const metrics = buildPlotMetrics(width, height, profile);
+    const textBoost = profile === "export" && config && config.presetId === "paper-wide" ? PAPER_WIDE_TEXT_BOOST : 0;
+    const metrics = buildPlotMetrics(width, height, profile, textBoost);
     const lowConfidenceMode = dom.lowConfidence && dom.lowConfidence.value ? dom.lowConfidence.value : state.plotLowConfidenceMode;
     state.plotLowConfidenceMode = lowConfidenceMode || "shaded";
     const lowConfidenceLegendTitle = dom.lowConfidence && dom.lowConfidence.title
@@ -4201,7 +4457,14 @@
     const layout =
       profile === "live"
         ? resolveLivePlotLayout(width, height, legendItems, metrics)
-        : resolveExportPlotLayout(width, height, legendItems, metrics, config && config.legendPlacement ? config.legendPlacement : "above");
+        : resolveExportPlotLayout(
+            width,
+            height,
+            legendItems,
+            metrics,
+            config && config.legendPlacement ? config.legendPlacement : "above",
+            config && config.presetId ? config.presetId : "custom",
+          );
     const chartX = layout.chartX;
     const chartY = layout.chartY;
     const chartWidth = layout.chartWidth;
@@ -4262,6 +4525,9 @@
         <clipPath id="${metrics.clipId}">
           <rect x="${chartX}" y="${chartY}" width="${chartWidth}" height="${chartHeight}"></rect>
         </clipPath>
+        <clipPath id="${metrics.signalClipId}">
+          <rect x="${chartX}" y="${chartY - metrics.signalClipPadding}" width="${chartWidth}" height="${chartHeight + 2 * metrics.signalClipPadding}"></rect>
+        </clipPath>
       </defs>
     `);
     if (includeInlineStyles) {
@@ -4290,6 +4556,9 @@
         parts.push(`<line class="hpa-plot-grid hpa-plot-grid-minor" x1="${x.toFixed(2)}" y1="${chartY}" x2="${x.toFixed(2)}" y2="${chartBottom}"></line>`);
       });
     }
+    parts.push("</g>");
+    parts.push(`<rect class="hpa-plot-axis-frame" x="${chartX}" y="${chartY}" width="${chartWidth}" height="${chartHeight}"></rect>`);
+    parts.push(`<g class="hpa-plot-data" clip-path="url(#${metrics.clipId})">`);
     if (diffusionConfidencePaths.length) {
       diffusionConfidencePaths.forEach((segment) => {
         const segmentClass = segment.lowConfidence
@@ -4305,12 +4574,16 @@
     if (smoothedDiffusionPath) {
       parts.push(`<path class="hpa-plot-line hpa-plot-line-diffusion-smoothed" d="${smoothedDiffusionPath}"></path>`);
     }
+    parts.push("</g>");
+    parts.push(`<g class="hpa-plot-signal-data" clip-path="url(#${metrics.signalClipId})">`);
     if (signalPath) {
       parts.push(`<path class="hpa-plot-line hpa-plot-line-current" d="${signalPath}"></path>`);
     }
     if (fitVisible && fitPath) {
       parts.push(`<path class="hpa-plot-line hpa-plot-line-fit" d="${fitPath}"></path>`);
     }
+    parts.push("</g>");
+    parts.push(`<g class="hpa-plot-chart" clip-path="url(#${metrics.clipId})">`);
     references.forEach((entry) => {
       if (!Number.isFinite(entry.plotValue) || state.referenceVisibility[entry.kind] === false) return;
       const y = scaleSignalY(entry.plotValue);
@@ -4321,6 +4594,10 @@
       parts.push(`<line class="hpa-plot-ref-line ${entry.className}" data-ref-kind="${entry.kind}"${staticCursor} x1="${chartX}" y1="${y.toFixed(2)}" x2="${chartRight}" y2="${y.toFixed(2)}"></line>`);
     });
     parts.push("</g>");
+    signalMinorTicksVisible.forEach((value) => {
+      const y = scaleSignalY(value);
+      parts.push(`<line class="hpa-plot-axis-tick hpa-plot-axis-tick-right hpa-plot-axis-tick-minor" x1="${chartRight}" y1="${y.toFixed(2)}" x2="${chartRight + metrics.rightMinorTickLength}" y2="${y.toFixed(2)}"></line>`);
+    });
     signalTicksVisible.forEach((value) => {
       const y = scaleSignalY(value);
       parts.push(
@@ -4432,6 +4709,7 @@
     state.plotHoverCache = scene.hoverCache;
     hidePlotTooltip();
     bindLegendTooltip(dom);
+    syncPlotAxisLimitDisplay(dom, analysis);
   }
 
   function renderPlotEmpty(dom) {
@@ -4439,6 +4717,7 @@
       dom.plot.innerHTML = `<div class="hpa-plot-empty">Paste data to see the preview plot.</div>`;
     }
     state.plotHoverCache = null;
+    syncPlotAxisLimitDisplay(dom, null);
   }
 
   function formatNumber(value) {
@@ -4546,8 +4825,7 @@
 
   function measureTextWidth(text, fontSize) {
     if (!textMeasureContext) return String(text || "").length * fontSize * 0.56;
-    const family = getComputedStyle(document.documentElement).getPropertyValue("--font-body").trim() || 'Arial, "Segoe UI", sans-serif';
-    textMeasureContext.font = `${fontSize}px ${family}`;
+    textMeasureContext.font = `${fontSize}px Arial, "Segoe UI", sans-serif`;
     return textMeasureContext.measureText(String(text || "")).width;
   }
 
@@ -5398,12 +5676,12 @@
     }
 
     const base = getBasePlotRanges(points);
-    if (!state.plotViewport) return base;
-
-    const xMin = Number.isFinite(state.plotViewport.xMin) ? state.plotViewport.xMin : base.xMin;
-    const xMax = Number.isFinite(state.plotViewport.xMax) ? state.plotViewport.xMax : base.xMax;
-    const yMin = Number.isFinite(state.plotViewport.yMin) ? state.plotViewport.yMin : base.yMin;
-    const yMax = Number.isFinite(state.plotViewport.yMax) ? state.plotViewport.yMax : base.yMax;
+    const viewport = state.plotViewport || {};
+    const limits = state.plotAxisLimits || emptyPlotAxisLimits();
+    const xMin = Number.isFinite(viewport.xMin) ? viewport.xMin : base.xMin;
+    const xMax = Number.isFinite(viewport.xMax) ? viewport.xMax : base.xMax;
+    const yMin = Number.isFinite(limits.signalMin) ? limits.signalMin : Number.isFinite(viewport.yMin) ? viewport.yMin : base.yMin;
+    const yMax = Number.isFinite(limits.signalMax) ? limits.signalMax : Number.isFinite(viewport.yMax) ? viewport.yMax : base.yMax;
     if (xMax <= xMin || yMax <= yMin) return base;
     return { xMin, xMax, yMin, yMax };
   }
@@ -6059,10 +6337,11 @@
 
     const thicknessMeters = thicknessMm / 1000;
     const fitOffset = Number.isFinite(fit.timeOffset) ? fit.timeOffset : Number.isFinite(fit.t0Offset) ? fit.t0Offset : 0;
+    const fittedStartTime = Math.max(0, -fitOffset);
     const currentSpan = steadyValue - baselineValue;
 
     return exportRows.map((row) => {
-      if (rowOrigin(row, ROW_ORIGIN_MEASURED) !== ROW_ORIGIN_MEASURED || !Number.isFinite(row.time)) {
+      if (!Number.isFinite(row.time) || row.time < fittedStartTime) {
         return { normalized: null, currentDisplay: null };
       }
       const modelTime = row.time + fitOffset;
