@@ -21,7 +21,7 @@ This repository is maintained as the citeable HPA software mirror.
 - Paste or upload a two-column transient file with time first and current second.
 - Compare classical evaluation methods, inverse Fickian analysis, and global
   transient fitting.
-- Inspect the plot in the browser and export PNG, SVG, or processed CSV output.
+- Inspect the plot in the browser and export PNG, SVG or processed CSV output.
 
 ## How to cite
 
