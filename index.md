@@ -241,7 +241,7 @@ permalink: /hpa/
             <div class="hpa-tool-panel-body">
               <div class="hpa-reference-row">
                 <div class="hpa-control">
-                  <label for="hpa-baseline-value" title="Enter the baseline current value.">Baseline</label>
+                  <label for="hpa-baseline-value" title="Enter the baseline current value.">Baseline [&micro;A]</label>
                   <input id="hpa-baseline-value" class="hpa-number" type="number" step="any" placeholder="Auto" title="Enter the baseline current value." />
                 </div>
                 <button type="button" class="hpa-button is-accent hpa-reference-toggle" id="hpa-baseline-reset" title="Reset the baseline value to the auto-detected data default.">Reset</button>
@@ -249,7 +249,7 @@ permalink: /hpa/
               </div>
               <div class="hpa-reference-row">
                 <div class="hpa-control">
-                  <label for="hpa-steady-value" title="Enter the steady-state current value.">Steady State</label>
+                  <label for="hpa-steady-value" title="Enter the steady-state current value.">Steady State [&micro;A]</label>
                   <input id="hpa-steady-value" class="hpa-number" type="number" step="any" placeholder="Auto" title="Enter the steady-state current value." />
                 </div>
                 <button type="button" class="hpa-button is-accent hpa-reference-toggle" id="hpa-steady-reset" title="Reset the steady-state value to the auto-detected data default.">Reset</button>
